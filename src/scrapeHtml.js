@@ -1,5 +1,5 @@
 import axios from 'axios';
-import cheerio from 'cheerio';
+import * as cheerio from 'cheerio';
 import { stripTags, canonicalizeUrl, shouldSkipHref, truncate } from './utils.js';
 import { extractDeadlineSmart } from './date.js';
 
