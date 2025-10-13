@@ -1,0 +1,22 @@
+name: Scrape and Update Sheets
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 毎週日曜22:00 JST = 13:00 UTC
+    - cron: "0 13 * * 0"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    env:
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      TZ: Asia/Tokyo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci || npm i
+      - run: npm run scrape
