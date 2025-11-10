@@ -1,25 +1,63 @@
-export const stripTags = (s) => String(s||'').replace(/<[^>]*>/g,'').replace(/\s+/g,' ').trim();
-export const truncate = (s, n=160) => {
-  s = String(s||''); return s.length>n? s.slice(0,n-1)+'…' : s;
-};
-export const toHan = (s) => String(s||'').replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0)-0xFEE0));
+// src/utils.js
+import axios from 'axios';
 
-export function canonicalizeUrl(href, base){
-  try{
-    if(!href) return '';
-    const h = String(href).trim();
-    if (/^https?:\/\//i.test(h)) return h;
-    if (h.startsWith('//')) return 'https:' + h;
-    if (/^(#|mailto:|tel:|javascript:|\?)/i.test(h)) return ''; // 保存しない
-    if (!base) return h; // 後で修復
-    return new URL(h, base).toString();
-  }catch(e){ return href; }
+// HTMLタグや余分な空白をざっくり除去
+export function stripTags(s) {
+  return String(s ?? '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
-export const hostOf = (abs) => { try { return new URL(abs).host; } catch(_) { return ''; } };
 
-export const shouldSkipHref = (href) => {
-  if(!href) return true;
-  if (/^(#|mailto:|tel:|javascript:|\?)/i.test(href)) return true;
-  if (/#group/i.test(href)) return true;
+// 相対URL -> 絶対URL
+export function canonicalizeUrl(href, base) {
+  try {
+    return new URL(href, base).toString();
+  } catch {
+    return '';
+  }
+}
+
+// aタグで無視したいリンクを弾く
+export function shouldSkipHref(href) {
+  const h = String(href || '').trim();
+  if (!h) return true;
+  if (h.startsWith('#')) return true;
+  if (/^#group\d+$/i.test(h)) return true;
+  const l = h.toLowerCase();
+  if (l.startsWith('javascript:')) return true;
+  if (l.startsWith('mailto:')) return true;
+  if (l.startsWith('tel:')) return true;
   return false;
-};
+}
+
+// 文字列を n 文字で省略
+export function truncate(s, n) {
+  const t = String(s ?? '');
+  return t.length > n ? t.slice(0, n - 1) + '…' : t;
+}
+
+// （一時対応）PDFの中身テキスト取得は無効化
+// もし他ファイルから呼ばれても空文字を返すだけにして落ちないようにする
+export async function maybeReadPdfText(/* url */) {
+  return '';
+}
+
+// もし将来PDFテキストを使いたい場合の雛形：
+// import pdfParse from 'pdf-parse';
+// export async function maybeReadPdfText(url) {
+//   if (!/\.pdf(?:$|\?)/i.test(url || '')) return '';
+//   try {
+//     const res = await axios.get(url, {
+//       responseType: 'arraybuffer',
+//       timeout: 15000,
+//       maxContentLength: 10 * 1024 * 1024,
+//       validateStatus: s => s < 400,
+//     });
+//     const buf = Buffer.from(res.data);
+//     const parsed = await pdfParse(buf);
+//     return stripTags(parsed.text || '');
+//   } catch {
+//     return '';
+//   }
+// }
