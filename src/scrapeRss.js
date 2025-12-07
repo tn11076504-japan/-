@@ -1,73 +1,52 @@
 // src/scrapeRss.js
-// RSS / Atom フィードから補助金っぽいエントリを拾うスクレイパー
-
 import axios from 'axios';
 import { XMLParser } from 'fast-xml-parser';
-
-import { stripTags, canonicalizeUrl, truncate } from './utils.js';
+import {
+  stripTags,
+  canonicalizeUrl,
+  todayJst
+} from './utils.js';
 import { extractDeadlineSmart } from './date.js';
 
 export async function scrapeRss(src, settings) {
   const url = String(src['URL'] || '').trim();
   if (!url) return [];
 
-  const includePattern = String(
-    src['抽出IN'] || settings.FILTER_INCLUDE || ''
-  ).trim();
-  const excludePattern = String(
-    src['抽出OUT'] || settings.FILTER_EXCLUDE || ''
-  ).trim();
+  const inRe = new RegExp(
+    String(src['抽出IN'] || settings.FILTER_INCLUDE || ''),
+    'i'
+  );
+  const outRe = new RegExp(
+    String(src['抽出OUT'] || settings.FILTER_EXCLUDE || ''),
+    'i'
+  );
   const mode = String(settings.DEADLINE_MODE || 'LOOSE');
 
-  let includeRe = null;
-  let excludeRe = null;
+  const res = await axios.get(url, { timeout: 15000 });
+  const parser = new XMLParser({ ignoreAttributes: false });
+  const doc = parser.parse(res.data);
 
-  try {
-    if (includePattern) includeRe = new RegExp(includePattern);
-  } catch (e) {
-    console.error('RSS include 正規表現エラー:', includePattern, e.message);
-  }
+  const channel = doc.rss?.channel || doc.feed;
+  if (!channel) return [];
 
-  try {
-    if (excludePattern) excludeRe = new RegExp(excludePattern);
-  } catch (e) {
-    console.error('RSS exclude 正規表現エラー:', excludePattern, e.message);
-  }
-
-  const res = await axios.get(url, {
-    timeout: 15000,
-    responseType: 'text',
-  });
-
-  const parser = new XMLParser({
-    ignoreAttributes: false,
-    attributeNamePrefix: '@_',
-  });
-  const data = parser.parse(res.data);
-
-  // rss2.0 / atom の両方をざっくりカバー
-  const items =
-    data?.rss?.channel?.item ||
-    data?.feed?.entry ||
-    [];
+  const items = channel.item || channel.entry || [];
+  const list = Array.isArray(items) ? items : [items];
 
   const recs = [];
 
-  for (const it of items) {
-    const title =
-      stripTags(it.title?.['#text'] ?? it.title ?? '') || '(無題)';
+  for (const it of list) {
+    const title = stripTags(it.title || '');
+    const linkRaw =
+      it.link?.['@_href'] || it.link || it.guid || '';
+    const desc = stripTags(it.description || it.summary || '');
+    const text = `${title} ${desc}`.trim();
 
-    const link =
-      it.link?.['@_href'] ||
-      it.link ||
-      it.guid ||
-      '';
+    if (!title) continue;
+    if (!inRe.test(text)) continue;
+    if (outRe.test(text)) continue;
 
-    const desc = stripTags(it.description || it.content || '');
-    const text = `${title} ${desc}`;
-
-    if (includeRe && !includeRe.test(text)) continue;
-    if (excludeRe && excludeRe.test(text)) continue;
+    const hrefAbs = canonicalizeUrl(linkRaw, url);
+    if (!hrefAbs) continue;
 
     const deadline = extractDeadlineSmart(
       text,
@@ -77,27 +56,18 @@ export async function scrapeRss(src, settings) {
 
     recs.push({
       県: src['県'] || '',
-      タイトル: truncate(title, 160),
+      タイトル: title || '(無題)',
       公募主体: src['主体(固定)'] || '',
       募集開始: '',
       締切日: deadline,
       補助率: '',
       上限額: '',
       対象: '',
-      URL: canonicalizeUrl(String(link || ''), url),
+      URL: hrefAbs,
       出典: src['名称'] || '',
-      取得日: todayStr(),
+      取得日: todayJst()
     });
   }
 
   return recs;
-}
-
-function todayStr() {
-  const now = new Date();
-  const tzOffsetMinutes = 9 * 60; // JST (UTC+9)
-  const jst = new Date(
-    now.getTime() + (tzOffsetMinutes - now.getTimezoneOffset()) * 60000
-  );
-  return jst.toISOString().slice(0, 10);
 }
