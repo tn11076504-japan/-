@@ -1,94 +1,66 @@
 // src/utils.js
-// 共通ユーティリティ関数群（HTML整形・URL整形・文字種変換など）
 
 /**
- * HTML タグを除去し、空白をきれいに整形したテキストを返す
+ * 全角英数字・記号 → 半角に変換
+ * 例: "ＡＢＣ１２３　" → "ABC123 "
  */
-export function stripTags(value = '') {
-  const str = String(value ?? '');
-  return str
-    .replace(/<[^>]*>/g, ' ')   // タグ除去
-    .replace(/&nbsp;/gi, ' ')   // NBSP をスペースへ
-    .replace(/\s+/g, ' ')       // 連続スペースを 1 個に
+export function toHan(value) {
+  if (value == null) return '';
+  return String(value)
+    // ASCII 全角 → 半角
+    .replace(/[！-～]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+    // 全角スペース → 半角スペース
+    .replace(/　/g, ' ');
+}
+
+/**
+ * HTMLタグ除去＋空白整理
+ * 例: "<p>テキスト<br>です</p>" → "テキスト です"
+ */
+export function stripTags(html = '') {
+  return String(html)
+    .replace(/<br\s*\/?>/gi, '\n')  // br は改行扱い
+    .replace(/<[^>]*>/g, '')       // その他タグ除去
+    .replace(/\s+/g, ' ')          // 連続空白を 1 個に
     .trim();
 }
 
 /**
- * 相対 URL を絶対 URL に正規化する
+ * 相対URLを絶対URLに正規化
+ * 例: canonicalizeUrl("/path", "https://example.com/base/")
  */
-export function canonicalizeUrl(href, baseUrl) {
-  const raw = String(href ?? '').trim();
-  if (!raw) return '';
-
-  // すでに絶対 URL の場合
-  if (/^https?:\/\//i.test(raw)) {
-    return raw;
-  }
-
+export function canonicalizeUrl(href, base) {
+  if (!href) return '';
   try {
-    const base = new URL(String(baseUrl ?? '').trim());
-    const abs = new URL(raw, base);
-    return abs.href;
+    const url = new URL(href, base);
+    return url.toString();
   } catch (e) {
+    // 不正なURLは無視
     return '';
   }
 }
 
 /**
- * a[href] を拾う時に「スキップしたいリンク」を判定する
+ * 明らかにリンクとして不要な href を弾く
+ * - 空文字
+ * - "#" や "#xxx"
+ * - "javascript:" や "mailto:"
  */
-export function shouldSkipHref(href) {
-  const s = String(href ?? '').trim();
-  if (!s) return true;
-  if (s.startsWith('#')) return true;
-  if (/^javascript:/i.test(s)) return true;
-  if (/^mailto:/i.test(s)) return true;
+export function shouldSkipHref(href = '') {
+  const h = String(href).trim();
+  if (!h) return true;
+  if (h === '#') return true;
+  if (h.startsWith('#')) return true;
+  if (h.toLowerCase().startsWith('javascript:')) return true;
+  if (h.toLowerCase().startsWith('mailto:')) return true;
   return false;
 }
 
 /**
- * 指定した長さに収まるように末尾を切り詰める（オーバー時は … を付与）
+ * 文字列を指定長でカットして "…" を付ける
  */
-export function truncate(value, maxLength) {
-  const str = String(value ?? '');
-  const n = Number(maxLength) || 0;
-  if (n <= 0) return str;
-  if (str.length <= n) return str;
-  if (n <= 1) return str.slice(0, n);
-  return str.slice(0, n - 1) + '…';
-}
-
-/**
- * 全角数字（０〜９）を半角数字（0〜9）に変換する
- * 日付パース前の前処理に使う
- */
-export function toHan(value) {
-  const str = String(value ?? '');
-  return str.replace(/[０-９]/g, ch =>
-    String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
-  );
-}
-
-/**
- * ざっくり空判定
- */
-export function isEmpty(v) {
-  return v === null || v === undefined || String(v).trim() === '';
-}
-
-export function notEmpty(v) {
-  return !isEmpty(v);
-}
-
-/**
- * JST(UTC+9) の yyyy-MM-dd を返す
- * いくつかのファイルで共通利用したい場合に使える
- */
-export function todayJst() {
-  const now = new Date();
-  const tzOffsetMinutes = 9 * 60; // JST
-  const jst = new Date(
-    now.getTime() + (tzOffsetMinutes - now.getTimezoneOffset()) * 60000
-  );
-  return jst.toISOString().slice(0, 10);
+export function truncate(text, max = 160) {
+  const s = String(text || '');
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + '…';
 }
