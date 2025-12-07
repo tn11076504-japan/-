@@ -9,7 +9,6 @@
     "axios": "^1.7.2",
     "cheerio": "^1.0.0-rc.12",
     "fast-xml-parser": "^4.4.0",
-    "googleapis": "^129.0.0",
-    "pdf-parse": "^1.1.1"
+    "googleapis": "^129.0.0"
   }
 }
