@@ -1,59 +1,97 @@
+// src/date.js
+// タイトルや本文のテキストから「締切日っぽい日付」を抜き出すヘルパー
+
 import { toHan } from './utils.js';
 
-const ERAS = { '令和':2018, '平成':1988, '昭和':1925 };
+/**
+ * テキストから締切日を推定して "YYYY-MM-DD" 文字列で返す
+ *
+ * @param {string} text       タイトル＋本文など
+ * @param {string} userRegex  設定シート / ソースシートで指定した正規表現（空でも可）
+ * @param {string} mode       'STRICT' | 'LOOSE' など（現状はほぼ未使用）
+ */
+export function extractDeadlineSmart(text, userRegex, mode = 'LOOSE') {
+  const src = toHan(String(text ?? ''));
 
-const ymd = (y,m,d)=> `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-
-export function normalizeDate(s){
-  if(!s) return '';
-  s = toHan(String(s).trim());
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  let m = /(\d{4})[./年](\d{1,2})[./月](\d{1,2})/.exec(s);
-  if (m) return ymd(m[1],m[2],m[3]);
-  let w = /(令和|平成|昭和)\s*(\d{1,2})年\s*(\d{1,2})月\s*(\d{1,2})日/.exec(s);
-  if (w) return ymd(ERAS[w[1]]+Number(w[2]), w[3], w[4]);
-  return '';
-}
-
-export function parseDateJp(text, mode='LOOSE'){
-  const s = toHan(String(text||''));
-  let m = /(\d{4})[./年](\d{1,2})[./月](\d{1,2})/.exec(s);
-  if (m) return ymd(m[1],m[2],m[3]);
-  let w = /(令和|平成|昭和)\s*(\d{1,2})年\s*(\d{1,2})月\s*(\d{1,2})日/.exec(s);
-  if (w) return ymd(ERAS[w[1]]+Number(w[2]), w[3], w[4]);
-  if (mode!=='STRICT'){
-    let a = /(\d{4})年?(\d{1,2})月(上旬|中旬|下旬)/.exec(s);
-    if (a){
-      const d = a[3]==='上旬'?5:a[3]==='中旬'?15:25;
-      return ymd(a[1],a[2],d);
+  // 1) ユーザー指定の正規表現があれば優先
+  if (userRegex) {
+    try {
+      const re = new RegExp(userRegex);
+      const m = src.match(re);
+      if (m && m[0]) {
+        const d = parseDateLike(m[0]);
+        if (d) return d;
+      }
+    } catch (e) {
+      // userRegex が壊れていても落とさない
     }
-    let b = /(\d{4})年度(内|まで)/.exec(s);
-    if (b) return ymd(Number(b[1])+1,3,31);
-    if (/随時|当面|常時受付/.test(s)) return '';
+  }
+
+  // 2) 典型的な "2025年10月31日" / "2025/10/31" パターン
+  let m = src.match(/(\d{4})[年\/\.](\d{1,2})[月\/\.](\d{1,2})日?/);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    const f = formatDate(y, mo, d);
+    if (f) return f;
+  }
+
+  // 3) "10月31日" だけ書いてあるケース → 今年として解釈（過ぎていたら来年）
+  m = src.match(/(\d{1,2})月(\d{1,2})日/);
+  if (m) {
+    const now = todayBaseDate();
+    let y = now.getFullYear();
+    const mo = Number(m[1]);
+    const d = Number(m[2]);
+    let f = formatDate(y, mo, d);
+    if (!f) return '(不明)';
+
+    // すでに過去の日付なら翌年扱い
+    if (new Date(f) < new Date(now.toISOString().slice(0, 10))) {
+      y += 1;
+      f = formatDate(y, mo, d);
+    }
+    if (f) return f;
+  }
+
+  // どうしても拾えない場合
+  return '(不明)';
+}
+
+function todayBaseDate() {
+  const now = new Date();
+  const tzOffsetMinutes = 9 * 60; // JST
+  const jst = new Date(
+    now.getTime() + (tzOffsetMinutes - now.getTimezoneOffset()) * 60000
+  );
+  return jst;
+}
+
+function pad2(n) {
+  return n < 10 ? '0' + n : String(n);
+}
+
+function formatDate(y, m, d) {
+  if (!y || !m || !d) return '';
+  if (m < 1 || m > 12) return '';
+  if (d < 1 || d > 31) return '';
+  return `${y}-${pad2(m)}-${pad2(d)}`;
+}
+
+/**
+ * "2025/10/31" や "2025年10月31日" のような文字列が渡ってきたと想定してパースする
+ */
+function parseDateLike(s) {
+  const str = String(s ?? '');
+  let m = str.match(/(\d{4})[年\/\.](\d{1,2})[月\/\.](\d{1,2})日?/);
+  if (m) {
+    return formatDate(Number(m[1]), Number(m[2]), Number(m[3]));
+  }
+  m = str.match(/(\d{1,2})月(\d{1,2})日/);
+  if (m) {
+    const base = todayBaseDate();
+    return formatDate(base.getFullYear(), Number(m[1]), Number(m[2]));
   }
   return '';
-}
-
-export function extractDeadlineSmart(text, explicitPattern, mode='LOOSE'){
-  const s = toHan(String(text||''));
-  if (explicitPattern){
-    try{
-      const m = new RegExp(explicitPattern).exec(s);
-      if (m && m[1] && m[2] && m[3]) return ymd(m[1],m[2],m[3]);
-    }catch(_){}
-  }
-  return parseDateJp(s, mode) || '';
-}
-
-export function extractStartDate(text, mode='LOOSE'){
-  const s = toHan(String(text||''));
-  const re = /(募集開始|受付開始|申請開始).{0,20}?(\d{4}[./-]\d{1,2}[./-]\d{1,2}|(令和|平成|昭和)\d{1,2}年\d{1,2}月\d{1,2}日)/;
-  const m = re.exec(s);
-  if (m) return normalizeDate(m[2]);
-  return '';
-}
-
-export function detectClosed(text){
-  const s = String(text||'');
-  return /(募集(は)?終了|受付(は)?終了|終了しました|締切(済|りました)|申請(は)?終了)/.test(s);
 }
