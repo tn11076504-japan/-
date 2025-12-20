@@ -1,5 +1,10 @@
 // src/index.js
-import { loadSources, loadSettings, appendToDb } from './sheets.js';
+import {
+  loadSources,
+  loadSettings,
+  appendToDb,
+  appendLog
+} from './sheets.js';
 import { scrapeHtml } from './scrapeHtml.js';
 import { scrapeRss } from './scrapeRss.js';
 
@@ -11,17 +16,24 @@ if (!SHEET_ID) {
 }
 
 async function main() {
-  console.log('--- start scrape ---');
+  await appendLog(SHEET_ID, 'INFO', 'scrape start');
+
   const settings = await loadSettings(SHEET_ID);
   const sources = await loadSources(SHEET_ID);
 
+  await appendLog(
+    SHEET_ID,
+    'INFO',
+    `有効ソース数=${sources.length}`
+  );
   console.log(`有効なソース: ${sources.length}件`);
 
   const allRecords = [];
 
   for (const src of sources) {
     const type = String(src['タイプ'] || 'html').toLowerCase();
-    console.log(`  src: ${src['名称']} (${type})`);
+    const name = src['名称'] || '';
+    console.log(`  src: ${name} (${type})`);
 
     try {
       let recs = [];
@@ -32,18 +44,40 @@ async function main() {
         recs = await scrapeHtml(src, settings);
       }
       console.log(`    → ${recs.length} 件`);
+
+      await appendLog(
+        SHEET_ID,
+        'INFO',
+        `source=${name} type=${type} recs=${recs.length}`
+      );
+
       allRecords.push(...recs);
     } catch (e) {
-      console.error(`    エラー: ${e.message}`);
+      const msg = `source=${name} error=${e.message}`;
+      console.error(`    エラー: ${msg}`);
+      await appendLog(SHEET_ID, 'ERROR', msg);
     }
   }
 
   console.log(`合計 ${allRecords.length} 件を案件DBに追加します`);
+
+  await appendLog(
+    SHEET_ID,
+    'INFO',
+    `収集完了: added=${allRecords.length}`
+  );
+
   await appendToDb(SHEET_ID, allRecords);
-  console.log('--- done ---');
+
+  await appendLog(SHEET_ID, 'INFO', 'scrape done');
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   console.error('致命的エラー', e);
+  try {
+    await appendLog(SHEET_ID, 'ERROR', `fatal=${e.message}`);
+  } catch {
+    // ログ書き込みに失敗しても、ここでは諦める
+  }
   process.exit(1);
 });
