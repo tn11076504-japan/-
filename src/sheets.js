@@ -4,7 +4,6 @@ import { todayJst } from './utils.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
-// サービスアカウントから認証クライアントを作成
 function getAuth() {
   const json = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   if (!json) {
@@ -24,7 +23,7 @@ export function getSheetsClient() {
   return google.sheets({ version: 'v4', auth });
 }
 
-// ソースシートを読む
+// 「ソース」シート読み込み
 export async function loadSources(spreadsheetId) {
   const sheets = getSheetsClient();
   const range = 'ソース!A1:Z1000';
@@ -61,10 +60,10 @@ export async function loadSources(spreadsheetId) {
   return sources;
 }
 
-// 設定シートを読む（フィルタ条件など）
+// 「設定」シート読み込み（フィルタ条件など）
 export async function loadSettings(spreadsheetId) {
   const sheets = getSheetsClient();
-  const range = '設定!A1:B20';
+  const range = '設定!A1:B50';
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
@@ -85,7 +84,7 @@ export async function loadSettings(spreadsheetId) {
   };
 }
 
-// 案件DB に追記（重複チェックはあとで強化）
+// 案件DB に追記（重複判定は簡易）
 export async function appendToDb(spreadsheetId, records) {
   if (!records || records.length === 0) return;
 
@@ -94,24 +93,24 @@ export async function appendToDb(spreadsheetId, records) {
 
   const values = records.map((r) => {
     const id = randomId();
-    const dupKey = `${r.県} ${r.タイトル}`.trim();
+    const dupKey = `${r.県 || ''} ${r.タイトル || ''}`.trim();
     return [
-      id,
-      r.取得日 || todayJst(),
-      r.県 || '',
-      r.タイトル || '',
-      r.公募主体 || '',
-      r.募集開始 || '',
-      r.締切日 || '',
-      r.補助率 || '',
-      r.上限額 || '',
-      r.対象 || '',
-      r.URL || '',
-      dupKey,
-      '新規',
-      0,
-      r.出典 || '',
-      ''
+      id,                         // id
+      r.取得日 || todayJst(),     // 取得日
+      r.県 || '',                 // 県
+      r.タイトル || '',           // タイトル
+      r.公募主体 || '',           // 公募主体
+      r.募集開始 || '',           // 募集開始
+      r.締切日 || '',             // 締切日
+      r.補助率 || '',             // 補助率
+      r.上限額 || '',             // 上限額
+      r.対象 || '',               // 対象
+      r.URL || '',                // URL
+      dupKey,                     // 重複キー（簡易）
+      '新規',                     // 新規/更新
+      0,                          // スコア
+      r.出典 || '',               // 出典
+      ''                          // 備考
     ];
   });
 
@@ -126,4 +125,31 @@ export async function appendToDb(spreadsheetId, records) {
 
 function randomId() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+// 「ログ」シートに 1 行追加（A:時刻, B:レベル, C:メッセージ）
+export async function appendLog(spreadsheetId, level, message) {
+  const sheets = getSheetsClient();
+
+  const now = new Date();
+  const offsetMinutes = 9 * 60; // JST
+  const jst = new Date(
+    now.getTime() + (offsetMinutes - now.getTimezoneOffset()) * 60000
+  );
+  const ts = jst.toISOString().replace('T', ' ').slice(0, 19); // yyyy-MM-dd HH:mm:ss
+
+  const values = [[ts, String(level), String(message)]];
+
+  try {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: 'ログ!A:C',
+      valueInputOption: 'USER_ENTERED',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values }
+    });
+  } catch (e) {
+    // ログ書き込みに失敗しても、Actions 自体は止めない
+    console.error('appendLog error:', e.message);
+  }
 }
