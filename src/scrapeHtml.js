@@ -8,18 +8,22 @@ import {
   todayJst
 } from './utils.js';
 import { extractDeadlineSmart } from './date.js';
+import { extractRate, extractAmount, extractTarget } from './detail.js';
 
 export async function scrapeHtml(src, settings) {
   const baseUrl = String(src['URL'] || '').trim();
   const scopePath = String(src['範囲(パス)'] || '').trim();
-  const inRe = new RegExp(
-    String(src['抽出IN'] || settings.FILTER_INCLUDE || ''),
-    'i'
+
+  const inPattern = String(
+    src['抽出IN'] || settings.FILTER_INCLUDE || ''
   );
-  const outRe = new RegExp(
-    String(src['抽出OUT'] || settings.FILTER_EXCLUDE || ''),
-    'i'
+  const outPattern = String(
+    src['抽出OUT'] || settings.FILTER_EXCLUDE || ''
   );
+
+  const inRe = inPattern ? new RegExp(inPattern, 'i') : null;
+  const outRe = outPattern ? new RegExp(outPattern, 'i') : null;
+
   const mode = String(settings.DEADLINE_MODE || 'LOOSE');
 
   if (!baseUrl) return [];
@@ -28,14 +32,14 @@ export async function scrapeHtml(src, settings) {
   const $ = cheerio.load(res.data);
 
   const recs = [];
+
   $('a[href]').each((_, a) => {
     const hrefRaw = $(a).attr('href') || '';
     if (shouldSkipHref(hrefRaw)) return;
 
-    let hrefAbs = canonicalizeUrl(hrefRaw, baseUrl);
+    const hrefAbs = canonicalizeUrl(hrefRaw, baseUrl);
     if (!hrefAbs) return;
 
-    // scopePath があればその配下だけ
     if (scopePath) {
       try {
         const p = new URL(hrefAbs).pathname || '/';
@@ -48,8 +52,8 @@ export async function scrapeHtml(src, settings) {
     const text = stripTags($(a).text());
     if (!text) return;
 
-    if (!inRe.test(text)) return;
-    if (outRe.test(text)) return;
+    if (inRe && !inRe.test(text)) return;
+    if (outRe && outRe.test(text)) return;
 
     const deadline = extractDeadlineSmart(
       text,
@@ -57,15 +61,19 @@ export async function scrapeHtml(src, settings) {
       mode
     );
 
+    const rate = extractRate(text);
+    const amount = extractAmount(text);
+    const target = extractTarget(text);
+
     recs.push({
       県: src['県'] || '',
       タイトル: text || '(無題)',
       公募主体: src['主体(固定)'] || '',
-      募集開始: '',
+      募集開始: '',           // 一覧ページではまだ空
       締切日: deadline,
-      補助率: '',
-      上限額: '',
-      対象: '',
+      補助率: rate,
+      上限額: amount,
+      対象: target,
       URL: hrefAbs,
       出典: src['名称'] || '',
       取得日: todayJst()
