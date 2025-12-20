@@ -7,19 +7,22 @@ import {
   todayJst
 } from './utils.js';
 import { extractDeadlineSmart } from './date.js';
+import { extractRate, extractAmount, extractTarget } from './detail.js';
 
 export async function scrapeRss(src, settings) {
   const url = String(src['URL'] || '').trim();
   if (!url) return [];
 
-  const inRe = new RegExp(
-    String(src['抽出IN'] || settings.FILTER_INCLUDE || ''),
-    'i'
+  const inPattern = String(
+    src['抽出IN'] || settings.FILTER_INCLUDE || ''
   );
-  const outRe = new RegExp(
-    String(src['抽出OUT'] || settings.FILTER_EXCLUDE || ''),
-    'i'
+  const outPattern = String(
+    src['抽出OUT'] || settings.FILTER_EXCLUDE || ''
   );
+
+  const inRe = inPattern ? new RegExp(inPattern, 'i') : null;
+  const outRe = outPattern ? new RegExp(outPattern, 'i') : null;
+
   const mode = String(settings.DEADLINE_MODE || 'LOOSE');
 
   const res = await axios.get(url, { timeout: 15000 });
@@ -38,12 +41,14 @@ export async function scrapeRss(src, settings) {
     const title = stripTags(it.title || '');
     const linkRaw =
       it.link?.['@_href'] || it.link || it.guid || '';
-    const desc = stripTags(it.description || it.summary || '');
+    const desc = stripTags(
+      it.description || it.summary || it.content || ''
+    );
     const text = `${title} ${desc}`.trim();
 
     if (!title) continue;
-    if (!inRe.test(text)) continue;
-    if (outRe.test(text)) continue;
+    if (inRe && !inRe.test(text)) continue;
+    if (outRe && outRe.test(text)) continue;
 
     const hrefAbs = canonicalizeUrl(linkRaw, url);
     if (!hrefAbs) continue;
@@ -54,15 +59,19 @@ export async function scrapeRss(src, settings) {
       mode
     );
 
+    const rate = extractRate(text);
+    const amount = extractAmount(text);
+    const target = extractTarget(text);
+
     recs.push({
       県: src['県'] || '',
       タイトル: title || '(無題)',
       公募主体: src['主体(固定)'] || '',
       募集開始: '',
       締切日: deadline,
-      補助率: '',
-      上限額: '',
-      対象: '',
+      補助率: rate,
+      上限額: amount,
+      対象: target,
       URL: hrefAbs,
       出典: src['名称'] || '',
       取得日: todayJst()
