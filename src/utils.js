@@ -1,6 +1,13 @@
 // src/utils.js
 import { URL } from 'node:url';
 
+// 全角英数 → 半角
+export function toHan(s = '') {
+  return String(s).replace(/[！-～]/g, (ch) =>
+    String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
+  );
+}
+
 // HTML タグ除去＋空白整形
 export function stripTags(html = '') {
   return String(html)
