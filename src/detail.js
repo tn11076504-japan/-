@@ -1,39 +1,94 @@
-// src/detail.js
-import { toHan } from './utils.js';
+// src/details.js
+//
+// 詳細ページに飛んで、募集開始 / 締切日 / 補助率 / 上限額 / 対象 を補強する
+//
 
-// 補助率（例: 補助率 2/3, 補助率 50%）
-export function extractRate(text = '') {
-  const s = toHan(text);
-  // 「補助率」「助成率」の後ろに 1〜2桁の数字＋%
-  const m = /(補助率|助成率)[^0-9％%]{0,10}([0-9]{1,2})\s*%/.exec(s);
-  if (m) {
-    return `${m[2]}%`;
+import axios from 'axios';
+import * as cheerio from 'cheerio';
+import { stripTags, truncate } from './utils.js';
+import { extractDateRange, extractRate, extractLimit, extractTarget, extractDeadlineSmart } from './date.js';
+
+/**
+ * records: scrapeHtml / scrapeRss が作った案件配列
+ * src: ソースシート 1 行分
+ */
+export async function enrichRecordsWithDetails(records, src, settings, logFn) {
+  if (!src.detail) return; // 詳細取得フラグ FALSE の場合は何もしない
+  if (!records || records.length === 0) return;
+
+  const maxPerSource = settings.MAX_DETAIL_PER_SOURCE || 80;
+  const targets = records.slice(0, maxPerSource);
+
+  let success = 0;
+  let deadlineHit = 0;
+  let startHit = 0;
+  let rateHit = 0;
+  let limitHit = 0;
+  let targetHit = 0;
+
+  for (const rec of targets) {
+    if (!rec.URL) continue;
+
+    try {
+      const res = await axios.get(rec.URL, { timeout: 15000 });
+      const $ = cheerio.load(res.data);
+      // 多少雑でも body 全体から拾う方針
+      const bodyText = stripTags($('body').html() || $('body').text() || '')
+        .replace(/\r?\n/g, '\n');
+
+      // 募集期間（開始・締切）
+      const range = extractDateRange(bodyText, src.startRegex || '');
+      if (range.start && !rec.募集開始) {
+        rec.募集開始 = range.start;
+        startHit++;
+      }
+      if (range.end && !rec.締切日) {
+        rec.締切日 = range.end;
+        deadlineHit++;
+      }
+      // もしどちらも取れていない＆リスト由来の締切も無い場合は、本文全体から保険で締切抽出
+      if (!rec.締切日) {
+        const dl = extractDeadlineSmart(bodyText, src.deadlineRegex || '', 'SMART');
+        if (dl) {
+          rec.締切日 = dl;
+          deadlineHit++;
+        }
+      }
+
+      // 補助率
+      const rate = extractRate(bodyText, src.rateRegex || '');
+      if (rate && !rec.補助率) {
+        rec.補助率 = rate;
+        rateHit++;
+      }
+
+      // 上限額
+      const limit = extractLimit(bodyText, src.limitRegex || '');
+      if (limit && !rec.上限額) {
+        rec.上限額 = limit;
+        limitHit++;
+      }
+
+      // 対象
+      const tgt = extractTarget(bodyText, src.targetRegex || '');
+      if (tgt && !rec.対象) {
+        rec.対象 = truncate(tgt, 60);
+        targetHit++;
+      }
+
+      success++;
+    } catch (e) {
+      if (logFn) {
+        await logFn(
+          `detail error url=${rec.URL} msg=${e.message || e.toString()}`
+        );
+      }
+    }
   }
-  // 「3分の2」などの表現は必要なら後で追加
-  return '';
-}
 
-// 上限額（例: 上限 100万円, 最大 50万円）
-export function extractAmount(text = '') {
-  const s = toHan(text);
-  const m = /(上限額?|最大)[^0-9]{0,10}([0-9,]+)\s*(万円|円)/.exec(s);
-  if (!m) return '';
-
-  let val = m[2].replace(/,/g, '');
-  if (m[3] === '万円') {
-    val = String(parseInt(val, 10) * 10000);
-  }
-  const n = Number(val);
-  if (!n) return '';
-  return `${n.toLocaleString('ja-JP')}円`;
-}
-
-// 対象（ざっくりキーワード）
-export function extractTarget(text = '') {
-  const s = String(text);
-  const m =
-    /(中小企業|小規模事業者?|個人事業主|創業|スタートアップ|NPO|農林水産|観光|IT|製造業?|商業)/.exec(
-      s
+  if (logFn) {
+    await logFn(
+      `detail summary source=${src.name} total=${records.length} fetched=${targets.length} ok=${success} startHit=${startHit} deadlineHit=${deadlineHit} rateHit=${rateHit} limitHit=${limitHit} targetHit=${targetHit}`
     );
-  return m ? m[1] : '';
+  }
 }
