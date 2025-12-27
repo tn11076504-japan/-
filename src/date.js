@@ -1,129 +1,226 @@
 // src/date.js
-// 締切日・開始日などの日付抽出ユーティリティ
-
-import { toHan } from './utils.js';
-
-/**
- * テキストから「募集は終了」「受付は終了」などの終了フラグを検出
- */
-export function detectClosed(text) {
-  const s = String(text || '');
-  return /(受付|募集)[^。]*終了|締切[^。]*過ぎ|申請受付を終了しました/.test(s);
-}
+//
+// 日付関係のユーティリティ
+//
 
 /**
- * 西暦 (YYYY) / 月 (1-12) / 日 (1-31) を 'YYYY-MM-DD' へ
+ * テキスト中の「令和/平成 or 西暦」の日付をすべて ISO (YYYY-MM-DD) で返す
  */
-export function normalizeDate(year, month, day) {
-  const y = Number(year);
-  const m = Number(month);
-  const d = Number(day);
-  if (!y || !m || !d) return '';
-  const mm = m.toString().padStart(2, '0');
-  const dd = d.toString().padStart(2, '0');
-  return `${y}-${mm}-${dd}`;
-}
+export function parseJapaneseDates(text = '') {
+  const t = String(text);
+  const results = [];
 
-/**
- * 令和表記を西暦に変換する簡易版
- * 例: '令和7年1月5日' → 2025-01-05
- */
-function parseReiwaDate(text) {
-  const m = text.match(/令和\s*([0-9０-９]+)\s*年\s*([0-9０-９]+)\s*月\s*([0-9０-９]+)\s*日/);
-  if (!m) return '';
-  const r = Number(toHan(m[1]));
-  const mo = Number(toHan(m[2]));
-  const d = Number(toHan(m[3]));
-  if (!r || !mo || !d) return '';
-  const year = 2018 + r; // 令和1年=2019年
-  return normalizeDate(year, mo, d);
-}
-
-/**
- * '2025年12月20日' / '2025/12/20' / '2025-12-20' などを検出
- */
-function parseSimpleDate(text) {
-  const s = toHan(text);
-  // 2025年12月20日
-  let m = s.match(/(20[0-9]{2})\s*年\s*([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/);
-  if (m) {
-    return normalizeDate(m[1], m[2], m[3]);
+  // 1) 元号表記
+  const eraRe = /(令和|平成)\s*([0-9]{1,2})\s*年\s*([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/g;
+  let m;
+  while ((m = eraRe.exec(t)) !== null) {
+    const era = m[1];
+    const nen = Number(m[2]);
+    const month = Number(m[3]);
+    const day = Number(m[4]);
+    if (!nen || !month || !day) continue;
+    let year;
+    if (era === '令和') {
+      year = 2018 + nen; // R1=2019
+    } else {
+      year = 1988 + nen; // H1=1989
+    }
+    results.push(toIsoDate(year, month, day));
   }
-  // 2025/12/20 or 2025-12-20
-  m = s.match(/(20[0-9]{2})[\/\-\.]([0-9]{1,2})[\/\-\.]([0-9]{1,2})/);
-  if (m) {
-    return normalizeDate(m[1], m[2], m[3]);
+
+  // 2) 西暦表記
+  const seirekiRe = /([0-9]{4})\s*年\s*([0-9]{1,2})\s*月\s*([0-9]{1,2})\s*日/g;
+  while ((m = seirekiRe.exec(t)) !== null) {
+    const year = Number(m[1]);
+    const month = Number(m[2]);
+    const day = Number(m[3]);
+    if (!year || !month || !day) continue;
+    results.push(toIsoDate(year, month, day));
   }
-  return '';
+
+  return results;
 }
 
 /**
- * 募集開始日抽出（現状は未使用だが将来のため stub 実装）
- * 必要になったら詳細実装を追加する想定
+ * リストや本文から締切日っぽい日付を 1 つ返す
+ * - overrideRegex があれば、そのマッチ部分から抽出
+ * - なければテキスト中の最後の日付を締切扱い
  */
-export function extractStartDate(text, customRegex = '', mode = 'LOOSE') {
-  // いったん未実装扱いで空文字を返す
-  // 将来「募集期間：2025年1月1日〜2月29日」から前半だけ抜くなどの処理を入れる
-  void text;
-  void customRegex;
-  void mode;
-  return '';
-}
+export function extractDeadlineSmart(text = '', overrideRegex = '', mode = 'SMART') {
+  const baseText = String(text || '');
 
-/**
- * 締切日を賢く（しかし安全に）推定する
- * - customRegex があれば優先
- * - なければ Reiwa → 年月日 → YYYY/MM/DD の順で探す
- * @param {string} text
- * @param {string} customRegex ソースシート「締切抽出REGEX」列
- * @param {string} mode 'STRICT' | 'LOOSE'
- */
-export function extractDeadlineSmart(text, customRegex = '', mode = 'LOOSE') {
-  const s = String(text || '');
-
-  // 1) カスタム正規表現（ソース側で調整できる）
-  if (customRegex) {
+  let dates = [];
+  if (overrideRegex) {
     try {
-      const re = new RegExp(customRegex);
-      const m = s.match(re);
-      if (m && m[1]) {
-        const fromCustom = parseSimpleDate(m[1]) || parseReiwaDate(m[1]);
-        if (fromCustom) return fromCustom;
+      const re = new RegExp(overrideRegex, 'u');
+      const m = baseText.match(re);
+      if (m) {
+        dates = parseJapaneseDates(m[0]);
       }
-    } catch {
-      // REGEX が壊れていても落ちないように握りつぶす
+    } catch (e) {
+      // REGEX が壊れていても死なないように
     }
   }
 
-  // 2) テキスト全体から Reiwa → 年月日 → YYYY/MM/DD の順で探す
-  const reiwa = parseReiwaDate(s);
-  if (reiwa) return reiwa;
-
-  const simple = parseSimpleDate(s);
-  if (simple) return simple;
-
-  // mode が STRICT のときは、あいまい判定をしない
-  if (String(mode || '').toUpperCase() === 'STRICT') {
-    return '';
+  if (dates.length === 0) {
+    dates = parseJapaneseDates(baseText);
   }
 
-  // 3) 「〜まで」「締切」近辺の日付だけを緩めに見る（LOOSE 用）
-  const around = s.match(/(.{0,16}(締切|まで).{0,16})/);
-  if (around) {
-    const candidate = around[1];
-    const dd = parseReiwaDate(candidate) || parseSimpleDate(candidate);
-    if (dd) return dd;
+  if (dates.length === 0) return '';
+  // 一番後ろの日付を締切とみなす
+  return dates[dates.length - 1];
+}
+
+/**
+ * テキストから「期間」を抽出して { start, end } を返す
+ * - まず overrideRegex があればその範囲から
+ * - なければ '募集期間','申請期間','受付期間' を含む行から
+ * - 最終的に、見つかった日付列の先頭と末尾を period とみなす
+ */
+export function extractDateRange(text = '', overrideRegex = '') {
+  const t = String(text || '');
+
+  let target = '';
+  if (overrideRegex) {
+    try {
+      const re = new RegExp(overrideRegex, 'u');
+      const m = t.match(re);
+      if (m) target = m[0];
+    } catch (e) {
+      // 無視
+    }
   }
+
+  if (!target) {
+    const lines = t.split(/\r?\n/);
+    const hit = lines.find(line =>
+      /募集期間|募集期間等|申請期間|受付期間|受付期間等/.test(line)
+    );
+    target = hit || t;
+  }
+
+  const dates = parseJapaneseDates(target);
+  if (dates.length >= 2) {
+    return { start: dates[0], end: dates[dates.length - 1] };
+  } else if (dates.length === 1) {
+    return { start: '', end: dates[0] };
+  }
+  return { start: '', end: '' };
+}
+
+/**
+ * 補助率を抽出（「補助率: 2/3」や「補助率 10/10」「1/2以内」など）→ そのまま文字列で返す
+ */
+export function extractRate(text = '', overrideRegex = '') {
+  const t = String(text || '');
+  let target = '';
+
+  if (overrideRegex) {
+    try {
+      const re = new RegExp(overrideRegex, 'u');
+      const m = t.match(re);
+      if (m) target = m[0];
+    } catch (e) {}
+  }
+
+  if (!target) {
+    const lines = t.split(/\r?\n/);
+    const hit = lines.find(line => /補助率|助成率/.test(line));
+    target = hit || '';
+  }
+
+  if (!target) return '';
+
+  // 例: "補助率 2/3以内" / "補助率 10/10" / "1/2"
+  const frac = target.match(/([0-9]+\/[0-9]+)\s*([以内まで]?)/);
+  if (frac) {
+    return frac[1] + (frac[2] || '');
+  }
+
+  // 例: "補助率 3分の2"
+  const bunno = target.match(/([0-9一二三四五六七八九]+)分の([0-9一二三四五六七八九]+)/);
+  if (bunno) {
+    return bunno[1] + '分の' + bunno[2];
+  }
+
+  // 例: "補助率 3/4、ただし上限◯◯円"
+  const percent = target.match(/([0-9]{1,3})\s*[%％]/);
+  if (percent) {
+    return percent[1] + '%';
+  }
+
+  if (/定額|全額/.test(target)) return '定額';
 
   return '';
 }
 
 /**
- * 「今日 (JST) の日付」を 'YYYY-MM-DD' で返す
+ * 上限額っぽい金額（◯円）を抽出
  */
-export function todayJst() {
-  const now = new Date();
-  const tzOffsetMinutes = 9 * 60; // JST (UTC+9)
-  const jst = new Date(now.getTime() + (tzOffsetMinutes - now.getTimezoneOffset()) * 60000);
-  return jst.toISOString().slice(0, 10);
+export function extractLimit(text = '', overrideRegex = '') {
+  const t = String(text || '');
+  let target = '';
+
+  if (overrideRegex) {
+    try {
+      const re = new RegExp(overrideRegex, 'u');
+      const m = t.match(re);
+      if (m) target = m[0];
+    } catch (e) {}
+  }
+
+  if (!target) {
+    const lines = t.split(/\r?\n/);
+    const hit = lines.find(line =>
+      /上限|上限額|補助上限|補助金額|限度額/.test(line)
+    );
+    target = hit || '';
+  }
+
+  if (!target) return '';
+
+  const m = target.match(/([0-9０-９,]+)\s*円/);
+  if (!m) return '';
+  const raw = m[1].replace(/[０-９]/g, d => String('０１２３４５６７８９'.indexOf(d)));
+  const num = raw.replace(/,/g, '');
+  return num ? `${Number(num).toLocaleString('ja-JP')}円` : '';
+}
+
+/**
+ * 対象者・対象事業の概要をざっくり抜く
+ * 文章そのままでは長いので、先頭 40 〜 60 文字だけ
+ */
+export function extractTarget(text = '', overrideRegex = '') {
+  const t = String(text || '');
+  let target = '';
+
+  if (overrideRegex) {
+    try {
+      const re = new RegExp(overrideRegex, 'u');
+      const m = t.match(re);
+      if (m) target = m[0];
+    } catch (e) {}
+  }
+
+  if (!target) {
+    const lines = t.split(/\r?\n/);
+    const hit = lines.find(line =>
+      /対象者|対象事業|補助対象|支援対象|対象となる/.test(line)
+    );
+    target = hit || '';
+  }
+
+  if (!target) return '';
+
+  const idx = target.search(/対象者|対象事業|補助対象|支援対象|対象となる/);
+  const s = idx >= 0 ? target.slice(idx) : target;
+  return s.replace(/\s+/g, ' ').slice(0, 60);
+}
+
+// 内部ユーティリティ
+function toIsoDate(year, month, day) {
+  const y = Number(year);
+  const m = String(Number(month)).padStart(2, '0');
+  const d = String(Number(day)).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
