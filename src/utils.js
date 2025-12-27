@@ -1,72 +1,78 @@
 // src/utils.js
-// 文字処理・URL処理などの共通ユーティリティ
+import { URL } from 'url';
 
 /**
- * HTML からタグを除去してプレーンテキストを返す
+ * HTML からタグを削除してテキストだけにする
  */
-export function stripTags(html) {
-  if (!html) return '';
+export function stripTags(html = '') {
   return String(html)
-    .replace(/<[^>]*>/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 /**
- * a.href が無効っぽい場合に true を返す
- */
-export function shouldSkipHref(href) {
-  const s = String(href || '').trim();
-  if (!s) return true;
-  if (s === '#') return true;
-  if (s.startsWith('#')) return true;
-  if (/^javascript:/i.test(s)) return true;
-  if (/^mailto:/i.test(s)) return true;
-  return false;
-}
-
-/**
- * 相対 URL を base からの絶対 URL に直し、ハッシュなどを落として返す
+ * 相対 URL を絶対 URL に変換
  */
 export function canonicalizeUrl(href, base) {
-  const raw = String(href || '').trim();
-  if (!raw) return '';
   try {
-    const url = new URL(raw, base);
-    url.hash = '';
-    return url.toString();
-  } catch {
+    if (!href) return '';
+    const u = new URL(href, base);
+    // #だけのリンクなどは捨てる
+    if (!u.protocol.startsWith('http')) return '';
+    return u.toString();
+  } catch (e) {
     return '';
   }
 }
 
 /**
- * 文字列を最大長で丸める。超えた場合は末尾に … を付与
+ * メールリンク・JavaScript など無視したい href を弾く
  */
-export function truncate(str, maxLen) {
-  if (!str) return '';
-  const s = String(str);
-  if (s.length <= maxLen) return s;
-  return s.slice(0, maxLen - 1) + '…';
+export function shouldSkipHref(href = '') {
+  const h = href.trim().toLowerCase();
+  if (!h) return true;
+  if (h.startsWith('#')) return true;
+  if (h.startsWith('javascript:')) return true;
+  if (h.startsWith('mailto:')) return true;
+  return false;
+}
+
+/**
+ * 文字列を指定長でトリム
+ */
+export function truncate(s, maxLen) {
+  const txt = String(s || '');
+  if (txt.length <= maxLen) return txt;
+  return txt.slice(0, maxLen - 1) + '…';
 }
 
 /**
  * URL からホスト名だけ取り出す
  */
-export function hostOf(urlStr) {
+export function hostOf(url = '') {
   try {
-    return new URL(String(urlStr || '')).host || '';
-  } catch {
+    const u = new URL(url);
+    return u.hostname || '';
+  } catch (e) {
     return '';
   }
 }
 
 /**
- * 全角英数を半角にする（雑だが実用十分）
+ * JST タイムスタンプ（YYYY-MM-DD HH:MM:SS）
  */
-export function toHan(str) {
-  if (!str) return '';
-  return String(str).replace(/[！-～]/g, (ch) =>
-    String.fromCharCode(ch.charCodeAt(0) - 0xFEE0),
-  );
+export function nowJstTimestamp() {
+  const now = new Date();
+  const jst = new Date(now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000);
+  return jst.toISOString().replace('T', ' ').slice(0, 19);
+}
+
+/**
+ * JST の日付（YYYY-MM-DD）
+ */
+export function todayJstDate() {
+  const now = new Date();
+  const jst = new Date(now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000);
+  return jst.toISOString().slice(0, 10);
 }
