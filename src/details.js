@@ -1,251 +1,219 @@
-// src/details.js
-// 補助金・公募の「詳細ページ」から募集開始・締切日・補助率・上限額・対象などを
-// できる限り汎用的に拾って、案件DBのレコードを上書き強化するモジュール。
-
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import {
+  sheetsClient as sheets,
+  SHEET_ID,
+  logInfo,
+  logWarn,
+} from './sheets.js';
+import { normalizeSpace } from './utils.js';
+import { extractDateRange, extractFirstDate } from './date.js';
 
-/**
- * メインエントリ
- * @param {Array<Object>} records scrapeHtml / scrapeRss で作った案件DB用レコード
- * @param {Object} src      ソース行（ソースシート1行分）
- * @param {Object} settings 設定（未使用でも受け取る）
- * @param {Function} log    ロガー関数 log(level, message)
- * @returns {Promise<Array<Object>>}
- */
-export async function enrichRecordsWithDetails(records, src, settings, log) {
-  const sourceName = String(src['名称'] || '');
-  const enabled = String(src['詳細取得'] || '').toUpperCase() === 'TRUE';
-
-  // 詳細取得フラグが FALSE なら何もしない
-  if (!enabled) {
-    if (log) log('INFO', `detail summary source=${sourceName} total=${records.length} skipped(detailFetchDisabled)`);
-    return records;
+function colLetter(n) {
+  let s = '';
+  while (n > 0) {
+    const mod = (n - 1) % 26;
+    s = String.fromCharCode(65 + mod) + s;
+    n = Math.floor((n - 1) / 26);
   }
-
-  const updated = [];
-  let fetched = 0;
-  let startHit = 0;
-  let deadlineHit = 0;
-  let rateHit = 0;
-  let limitHit = 0;
-  let targetHit = 0;
-
-  for (const rec of records) {
-    const url = String(rec.URL || rec.Url || '').trim();
-    if (!url) {
-      updated.push(rec);
-      continue;
-    }
-
-    let htmlText = '';
-    try {
-      const res = await axios.get(url, { timeout: 15000 });
-      fetched++;
-      const $ = cheerio.load(res.data);
-
-      // 汎用的に「本文らしき箇所」をなるべく狭く取る
-      const main =
-        $('article').first().text() ||
-        $('.post').first().text() ||
-        $('.entry').first().text() ||
-        $('#contents').first().text() ||
-        $('#content').first().text() ||
-        $('#main').first().text() ||
-        $('body').text();
-
-      htmlText = (main || '').replace(/\s+/g, ' ').trim();
-    } catch (e) {
-      if (log) {
-        log(
-          'WARN',
-          `detail fetch error source=${sourceName} url=${url} ${e && e.message ? e.message : e}`
-        );
-      }
-      updated.push(rec);
-      continue;
-    }
-
-    if (!htmlText) {
-      updated.push(rec);
-      continue;
-    }
-
-    const detail = extractDetailFields(htmlText);
-
-    // ====== 抽出結果をレコードにマージ ======
-    // すでに値が入っている場合は「既存優先」で、空欄のときだけ上書きします。
-    if (detail.startDate && !rec.募集開始) {
-      rec.募集開始 = detail.startDate;
-      startHit++;
-    }
-    if (detail.deadline && !rec.締切日) {
-      rec.締切日 = detail.deadline;
-      deadlineHit++;
-    }
-    if (detail.rate && !rec.補助率) {
-      rec.補助率 = detail.rate;
-      rateHit++;
-    }
-    if (detail.limit && !rec.上限額) {
-      rec.上限額 = detail.limit;
-      limitHit++;
-    }
-    if (detail.target && !rec.対象) {
-      rec.対象 = detail.target;
-      targetHit++;
-    }
-
-    updated.push(rec);
-  }
-
-  if (log) {
-    log(
-      'INFO',
-      `detail summary source=${sourceName} total=${records.length} fetched=${fetched}` +
-        ` startHit=${startHit} deadlineHit=${deadlineHit} rateHit=${rateHit}` +
-        ` limitHit=${limitHit} targetHit=${targetHit}`
-    );
-  }
-
-  return updated;
+  return s;
 }
 
-/**
- * 1ページ分の本文テキストから、募集開始・締切・補助率・上限額・対象をざっくり抽出
- * 汎用ロジックなので、個別サイトごとのチューニングはここに追加していく。
- */
-function extractDetailFields(text) {
-  const result = {
-    startDate: '',
+async function fetchDetailsFromPage(url, src) {
+  const res = await axios.get(url, { timeout: 15000 });
+  const html = res.data;
+  const $ = cheerio.load(html);
+
+  const details = {
+    start: '',
     deadline: '',
     rate: '',
     limit: '',
     target: '',
   };
 
-  const normalized = text.replace(/\s+/g, ' ');
+  // 1) th/td の表を優先的に見る
+  $('tr').each((_, tr) => {
+    const th = normalizeSpace($(tr).find('th').text());
+    const td = normalizeSpace($(tr).find('td').text());
+    if (!th || !td) return;
 
-  // ========== 対象 ==========
-  // 「中小企業」が出てきたら、とりあえず対象は中小企業とみなす（今の要件に合わせて）
-  if (/中小企業/.test(normalized)) {
-    result.target = '中小企業';
-  }
-
-  // 「対象者」「対象企業」などの行を一文だけ抜く
-  const targetMatch = normalized.match(/(対象者|対象企業|対象となる方|対象[：:])[：:]?([^。]+)[。]/);
-  if (targetMatch && targetMatch[2]) {
-    const t = targetMatch[2].trim();
-    if (t && (!result.target || t.length < result.target.length + 5)) {
-      result.target = t;
-    }
-  }
-
-  // ========== 補助率 ==========
-  const rateMatch = normalized.match(/(補助率[：:は]?[^。]+)/);
-  if (rateMatch) {
-    result.rate = rateMatch[1].trim();
-  } else {
-    // 「助成率」「負担割合」等も一応カバー
-    const rateAlt = normalized.match(/(助成率|負担割合)[：:は]?[^。]+/);
-    if (rateAlt) {
-      result.rate = rateAlt[0].trim();
-    }
-  }
-
-  // ========== 上限額 ==========
-  const limitMatch = normalized.match(/(補助上限額|補助上限|上限額|上限|限度額)[：:は]?[^。]+/);
-  if (limitMatch) {
-    result.limit = limitMatch[0].trim();
-  }
-
-  // ========== 募集開始 & 締切 ==========
-  // 「募集期間」「受付期間」「申請期間」「公募期間」などの行を対象にして
-  // その中から日付を 2個取れたら [開始, 締切] とみなす。
-  const periodMatch = normalized.match(
-    /(募集期間|受付期間|申請期間|公募期間|申込期間|募集受付期間)[^。]{0,80}。/
-  );
-  if (periodMatch) {
-    const periodText = periodMatch[0];
-    const dates = extractAllDates(periodText);
-    if (dates.length >= 2) {
-      result.startDate = dates[0];
-      result.deadline = dates[1];
-    } else if (dates.length === 1) {
-      // 1つしか取れない場合、締切だけ分かるパターンが多いので締切に入れておく
-      result.deadline = dates[0];
-    }
-  }
-
-  // それでも締切が空なら、全体から「〜まで」の近くの1日付を締切として拾う
-  if (!result.deadline) {
-    const untilMatch = normalized.match(/([0-9０-９令和平成昭和].{0,30}まで)/);
-    if (untilMatch) {
-      const dates = extractAllDates(untilMatch[1]);
-      if (dates.length >= 1) {
-        result.deadline = dates[dates.length - 1];
+    // 募集期間 → 開始と締切をまとめて取る
+    if (/募集期間|申請期間|受付期間|公募期間/.test(th)) {
+      const [s, e] = extractDateRange(td, src['締切抽出REGEX']);
+      if (s && !details.start) details.start = s;
+      if (e && !details.deadline) details.deadline = e;
+    } else if (/募集開始|受付開始/.test(th)) {
+      if (!details.start) {
+        const d = extractFirstDate(
+          td,
+          src['募集開始REGEX'] || src['締切抽出REGEX'],
+        );
+        if (d) details.start = d;
+      }
+    } else if (/締切|締め切り|応募期限|受付終了/.test(th)) {
+      if (!details.deadline) {
+        const d = extractFirstDate(td, src['締切抽出REGEX']);
+        if (d) details.deadline = d;
       }
     }
+
+    if (!details.rate && /補助率|助成率|支援率/.test(th)) {
+      details.rate = td;
+    }
+    if (!details.limit && /上限額|限度額|最大額|補助上限/.test(th)) {
+      details.limit = td;
+    }
+    if (!details.target && /対象[者]?/.test(th)) {
+      details.target = td;
+    }
+  });
+
+  // 2) 表で取れなかったものは本文テキストから拾う
+  const bodyText = normalizeSpace($('body').text());
+
+  if (!details.deadline) {
+    const d = extractFirstDate(bodyText, src['締切抽出REGEX']);
+    if (d) details.deadline = d;
   }
 
-  return result;
+  if (!details.start) {
+    const idx = bodyText.search(/(募集開始|申請開始|受付開始)/);
+    if (idx >= 0) {
+      const segment = bodyText.slice(idx, idx + 80);
+      const d = extractFirstDate(
+        segment,
+        src['募集開始REGEX'] || src['締切抽出REGEX'],
+      );
+      if (d) details.start = d;
+    }
+  }
+
+  if (!details.rate) {
+    const m = bodyText.match(/補助率[：:は]?([^。\n\r]+)/);
+    if (m) details.rate = normalizeSpace(m[1]);
+  }
+  if (!details.limit) {
+    const m = bodyText.match(/(上限額|補助上限|限度額)[：:は]?([^。\n\r]+)/);
+    if (m) details.limit = normalizeSpace(m[2] || m[1]);
+  }
+  if (!details.target) {
+    const m = bodyText.match(/対象[者]?[：:は]?([^。\n\r]+)/);
+    if (m) details.target = normalizeSpace(m[1]);
+  }
+
+  return details;
 }
 
-/**
- * テキスト中から「西暦 or 元号付きの日付」を全部抜き出して ISO 形式(YYYY-MM-DD)にする
- */
-function extractAllDates(text) {
-  const dates = [];
+// adoptedRecords: appendRecords が返した [{ id, url }, ...]
+export async function enrichRecordsWithDetails(adoptedRecords, src) {
+  if (!adoptedRecords || adoptedRecords.length === 0) return;
 
-  // 西暦パターン 2025年12月28日 / 2025/12/28 など
-  const westernRe = /(20\d{2})[年\/.-]\s*(\d{1,2})[月\/.-]\s*(\d{1,2})日?/g;
-  let m;
-  while ((m = westernRe.exec(text)) !== null) {
-    const iso = toIsoDate(Number(m[1]), Number(m[2]), Number(m[3]));
-    if (iso) dates.push(iso);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: '案件DB!A1:K',
+  });
+  const rows = res.data.values || [];
+  if (rows.length === 0) return;
+  const headers = rows[0];
+
+  const urlIdx = headers.indexOf('URL');
+  const startIdx = headers.indexOf('募集開始');
+  const deadlineIdx = headers.indexOf('締切日');
+  const rateIdx = headers.indexOf('補助率');
+  const limitIdx = headers.indexOf('上限額');
+  const targetIdx = headers.indexOf('対象');
+
+  if (urlIdx === -1) return;
+
+  const urlToRow = new Map();
+  rows.slice(1).forEach((row, i) => {
+    const url = row[urlIdx];
+    if (url) urlToRow.set(url, i + 2); // 1-based + ヘッダ行
+  });
+
+  const updates = [];
+  let fetched = 0;
+  let ok = 0;
+  let startHit = 0;
+  let deadlineHit = 0;
+  let rateHit = 0;
+  let limitHit = 0;
+  let targetHit = 0;
+
+  for (const rec of adoptedRecords) {
+    const url = rec.url;
+    const rowNum = urlToRow.get(url);
+    if (!rowNum) continue;
+
+    try {
+      const detail = await fetchDetailsFromPage(url, src);
+      fetched++;
+
+      let any = false;
+
+      if (detail.start && startIdx >= 0) {
+        updates.push({
+          range: `案件DB!${colLetter(startIdx + 1)}${rowNum}`,
+          values: [[detail.start]],
+        });
+        startHit++;
+        any = true;
+      }
+
+      if (detail.deadline && deadlineIdx >= 0) {
+        updates.push({
+          range: `案件DB!${colLetter(deadlineIdx + 1)}${rowNum}`,
+          values: [[detail.deadline]],
+        });
+        deadlineHit++;
+        any = true;
+      }
+
+      if (detail.rate && rateIdx >= 0) {
+        updates.push({
+          range: `案件DB!${colLetter(rateIdx + 1)}${rowNum}`,
+          values: [[detail.rate]],
+        });
+        rateHit++;
+        any = true;
+      }
+
+      if (detail.limit && limitIdx >= 0) {
+        updates.push({
+          range: `案件DB!${colLetter(limitIdx + 1)}${rowNum}`,
+          values: [[detail.limit]],
+        });
+        limitHit++;
+        any = true;
+      }
+
+      if (detail.target && targetIdx >= 0) {
+        updates.push({
+          range: `案件DB!${colLetter(targetIdx + 1)}${rowNum}`,
+          values: [[detail.target]],
+        });
+        targetHit++;
+        any = true;
+      }
+
+      if (any) ok++;
+    } catch (e) {
+      await logWarn(`detail error url=${url} ${e.message}`);
+    }
   }
 
-  // 元号（令和 / 平成 / 昭和）パターン
-  const eraRe = /(令和|平成|昭和)\s*(\d{1,2})年\s*(\d{1,2})月\s*(\d{1,2})日?/g;
-  while ((m = eraRe.exec(text)) !== null) {
-    const year = eraToAD(m[1], Number(m[2]));
-    const iso = toIsoDate(year, Number(m[3]), Number(m[4]));
-    if (iso) dates.push(iso);
+  if (updates.length) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data: updates,
+      },
+    });
   }
 
-  // 「R7.2.28」みたいな略記も一応拾っておく
-  const shortEraRe = /R(\d{1,2})\.(\d{1,2})\.(\d{1,2})/gi;
-  while ((m = shortEraRe.exec(text)) !== null) {
-    const year = 2018 + Number(m[1]); // R1=2019
-    const iso = toIsoDate(year, Number(m[2]), Number(m[3]));
-    if (iso) dates.push(iso);
-  }
-
-  return dates;
-}
-
-function toIsoDate(year, month, day) {
-  if (!year || !month || !day) return '';
-  try {
-    // JS の Date は月が 0 始まりなので -1 する
-    const d = new Date(Date.UTC(year, month - 1, day));
-    if (Number.isNaN(d.getTime())) return '';
-    return d.toISOString().slice(0, 10);
-  } catch {
-    return '';
-  }
-}
-
-function eraToAD(era, n) {
-  // ざっくり変換（日本の補助金サイトで使う範囲ならこれで十分）
-  if (era === '令和') {
-    return 2018 + n; // R1=2019
-  }
-  if (era === '平成') {
-    return 1988 + n; // H1=1989
-  }
-  if (era === '昭和') {
-    return 1925 + n; // S1=1926
-  }
-  return 2000 + n; // fallback
+  await logInfo(
+    `detail summary source=${src['名称']} total=${adoptedRecords.length} fetched=${fetched} ok=${ok} startHit=${startHit} deadlineHit=${deadlineHit} rateHit=${rateHit} limitHit=${limitHit} targetHit=${targetHit}`,
+  );
 }
