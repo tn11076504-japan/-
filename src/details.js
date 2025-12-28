@@ -138,8 +138,18 @@ export async function enrichDetails(
 }
 
 /**
- * 互換用の別名（index.js がどの名前で呼んでいても動くようにエイリアスを定義）
+ * 互換用の別名（index.js からいろんな名前で呼ばれても動くようにする）
+ * ここに「enrichRecordsWithDetails」を追加するのが今回のポイント。
  */
+export async function enrichRecordsWithDetails(
+  records,
+  src,
+  settings,
+  logger
+) {
+  return enrichDetails(records, src, settings, logger);
+}
+
 export async function fetchDetails(records, src, settings, logger) {
   return enrichDetails(records, src, settings, logger);
 }
@@ -210,7 +220,6 @@ function pickStartDate(text, patternStart) {
   if (v) return v;
 
   // 汎用ざっくりロジック
-  // 「募集期間」「受付期間」「申請期間」などの周辺から YYYY年MM月DD日〜 形式を拾う
   const generic =
     /(募集期間|受付期間|申請期間|募集開始)[^0-9０-９]{0,10}([0-9０-９]{4}年[0-9０-９]{1,2}月[0-9０-９]{1,2}日)/;
   const m = text.match(generic);
