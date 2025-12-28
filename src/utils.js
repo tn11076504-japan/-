@@ -91,6 +91,23 @@ export function todayJst() {
   return jst.toISOString().slice(0, 10);
 }
 
+// TRUE/FALSE っぽい値を boolean に変換
+// - true とみなす: true, "true", "1", "yes", "y", "on"
+// - false とみなす: false, "", null, undefined, "false", "0", "no", "n", "off"
+export function toBool(v) {
+  if (typeof v === "boolean") return v;
+  if (v === null || v === undefined) return false;
+
+  const s = String(v).trim().toLowerCase();
+  if (!s) return false;
+
+  if (["false", "0", "no", "n", "off", "ng"].includes(s)) return false;
+  if (["true", "1", "yes", "y", "on", "ok"].includes(s)) return true;
+
+  // どちらでもない曖昧な場合は「有効」とみなして true
+  return true;
+}
+
 // 簡易なランダムID（案件DBのA列などで使用）
 export function randomId(length = 4) {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
