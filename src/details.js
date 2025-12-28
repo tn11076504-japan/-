@@ -1,309 +1,251 @@
 // src/details.js
-// 各案件の詳細ページにアクセスして
-// 「募集開始・締切日・補助率・上限額・対象」を抽出し、
-// レコードオブジェクトの日本語キーに書き戻すモジュール。
+// 補助金・公募の「詳細ページ」から募集開始・締切日・補助率・上限額・対象などを
+// できる限り汎用的に拾って、案件DBのレコードを上書き強化するモジュール。
 
-import axios from "axios";
-import * as cheerio from "cheerio";
-import { stripTags, canonicalizeUrl } from "./utils.js";
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 
 /**
- * メインの詳細スクレイピング関数
- *
- * @param {Array<Object>} records  案件DBに追加予定のレコード配列
- * @param {Object} src             「ソース」シート1行分のオブジェクト
- * @param {Object} settings        全体設定（未使用なら {} でOK）
- * @param {Object} logger          ロガー（info/warn/error を持つ想定。なければ console）
- * @returns {Promise<Object>}      サマリ（total/fetched/ok/...）
+ * メインエントリ
+ * @param {Array<Object>} records scrapeHtml / scrapeRss で作った案件DB用レコード
+ * @param {Object} src      ソース行（ソースシート1行分）
+ * @param {Object} settings 設定（未使用でも受け取る）
+ * @param {Function} log    ロガー関数 log(level, message)
+ * @returns {Promise<Array<Object>>}
  */
-export async function enrichDetails(
-  records,
-  src,
-  settings = {},
-  logger = console
-) {
-  const log = createLogger(logger);
+export async function enrichRecordsWithDetails(records, src, settings, log) {
+  const sourceName = String(src['名称'] || '');
+  const enabled = String(src['詳細取得'] || '').toUpperCase() === 'TRUE';
 
-  const total = Array.isArray(records) ? records.length : 0;
-  if (!total) {
-    log.info("detail: no records to enrich");
-    return makeSummary({ total });
+  // 詳細取得フラグが FALSE なら何もしない
+  if (!enabled) {
+    if (log) log('INFO', `detail summary source=${sourceName} total=${records.length} skipped(detailFetchDisabled)`);
+    return records;
   }
 
-  // 「詳細取得」列が TRUE のものだけ詳細スクレイピングする
-  const flag =
-    (src["詳細取得"] ?? src["詳細"] ?? "").toString().toLowerCase() === "true";
-  if (!flag) {
-    log.info(
-      `detail: skip (詳細取得=FALSE) source=${src["名称"] || src["name"] || ""}`
-    );
-    return makeSummary({ total });
-  }
-
-  // ソース行から個別REGEXを取得
-  const patternStart = safePattern(src["募集開始REGEX"]);
-  const patternDeadline = safePattern(src["締切抽出REGEX"]);
-  const patternRate = safePattern(src["補助率REGEX"]);
-  const patternLimit = safePattern(src["上限額REGEX"]);
-  const patternTarget = safePattern(src["対象REGEX"]);
-
+  const updated = [];
   let fetched = 0;
-  let ok = 0;
   let startHit = 0;
   let deadlineHit = 0;
   let rateHit = 0;
   let limitHit = 0;
   let targetHit = 0;
 
-  const sourceName = src["名称"] || src["name"] || "";
-
   for (const rec of records) {
-    const urlRaw = rec.URL || rec["URL"];
-    if (!urlRaw) continue;
+    const url = String(rec.URL || rec.Url || '').trim();
+    if (!url) {
+      updated.push(rec);
+      continue;
+    }
 
-    const url = canonicalizeUrl(urlRaw, src["URL"] || "");
-    if (!url || !/^https?:\/\//i.test(url)) continue;
-
+    let htmlText = '';
     try {
       const res = await axios.get(url, { timeout: 15000 });
       fetched++;
-
       const $ = cheerio.load(res.data);
-      // ページ全体テキスト（HTMLタグ除去）
-      const bodyText = stripTags($("body").text() || "");
 
-      // --- 抽出処理 ---
-      const start = pickStartDate(bodyText, patternStart);
-      const deadline = pickDeadline(bodyText, patternDeadline);
-      const rate = pickRate(bodyText, patternRate);
-      const limit = pickLimit(bodyText, patternLimit);
-      const target = pickTarget(bodyText, patternTarget);
+      // 汎用的に「本文らしき箇所」をなるべく狭く取る
+      const main =
+        $('article').first().text() ||
+        $('.post').first().text() ||
+        $('.entry').first().text() ||
+        $('#contents').first().text() ||
+        $('#content').first().text() ||
+        $('#main').first().text() ||
+        $('body').text();
 
-      if (start) {
-        rec.startDate = start; // 英語キー（将来用）
-        rec["募集開始"] = start; // 案件DB用
-        startHit++;
-      }
-      if (deadline) {
-        rec.deadline = deadline;
-        rec["締切日"] = deadline;
-        deadlineHit++;
-      }
-      if (rate) {
-        rec.rate = rate;
-        rec["補助率"] = rate;
-        rateHit++;
-      }
-      if (limit) {
-        rec.limit = limit;
-        rec["上限額"] = limit;
-        limitHit++;
-      }
-      if (target) {
-        rec.target = target;
-        rec["対象"] = target;
-        targetHit++;
-      }
-
-      if (start || deadline || rate || limit || target) {
-        ok++;
-      }
+      htmlText = (main || '').replace(/\s+/g, ' ').trim();
     } catch (e) {
-      log.warn(
-        `detail: fetch failed url=${url} source=${sourceName} msg=${
-          e.message || e
-        }`
-      );
+      if (log) {
+        log(
+          'WARN',
+          `detail fetch error source=${sourceName} url=${url} ${e && e.message ? e.message : e}`
+        );
+      }
+      updated.push(rec);
+      continue;
+    }
+
+    if (!htmlText) {
+      updated.push(rec);
+      continue;
+    }
+
+    const detail = extractDetailFields(htmlText);
+
+    // ====== 抽出結果をレコードにマージ ======
+    // すでに値が入っている場合は「既存優先」で、空欄のときだけ上書きします。
+    if (detail.startDate && !rec.募集開始) {
+      rec.募集開始 = detail.startDate;
+      startHit++;
+    }
+    if (detail.deadline && !rec.締切日) {
+      rec.締切日 = detail.deadline;
+      deadlineHit++;
+    }
+    if (detail.rate && !rec.補助率) {
+      rec.補助率 = detail.rate;
+      rateHit++;
+    }
+    if (detail.limit && !rec.上限額) {
+      rec.上限額 = detail.limit;
+      limitHit++;
+    }
+    if (detail.target && !rec.対象) {
+      rec.対象 = detail.target;
+      targetHit++;
+    }
+
+    updated.push(rec);
+  }
+
+  if (log) {
+    log(
+      'INFO',
+      `detail summary source=${sourceName} total=${records.length} fetched=${fetched}` +
+        ` startHit=${startHit} deadlineHit=${deadlineHit} rateHit=${rateHit}` +
+        ` limitHit=${limitHit} targetHit=${targetHit}`
+    );
+  }
+
+  return updated;
+}
+
+/**
+ * 1ページ分の本文テキストから、募集開始・締切・補助率・上限額・対象をざっくり抽出
+ * 汎用ロジックなので、個別サイトごとのチューニングはここに追加していく。
+ */
+function extractDetailFields(text) {
+  const result = {
+    startDate: '',
+    deadline: '',
+    rate: '',
+    limit: '',
+    target: '',
+  };
+
+  const normalized = text.replace(/\s+/g, ' ');
+
+  // ========== 対象 ==========
+  // 「中小企業」が出てきたら、とりあえず対象は中小企業とみなす（今の要件に合わせて）
+  if (/中小企業/.test(normalized)) {
+    result.target = '中小企業';
+  }
+
+  // 「対象者」「対象企業」などの行を一文だけ抜く
+  const targetMatch = normalized.match(/(対象者|対象企業|対象となる方|対象[：:])[：:]?([^。]+)[。]/);
+  if (targetMatch && targetMatch[2]) {
+    const t = targetMatch[2].trim();
+    if (t && (!result.target || t.length < result.target.length + 5)) {
+      result.target = t;
     }
   }
 
-  const summary = makeSummary({
-    total,
-    fetched,
-    ok,
-    startHit,
-    deadlineHit,
-    rateHit,
-    limitHit,
-    targetHit,
-  });
+  // ========== 補助率 ==========
+  const rateMatch = normalized.match(/(補助率[：:は]?[^。]+)/);
+  if (rateMatch) {
+    result.rate = rateMatch[1].trim();
+  } else {
+    // 「助成率」「負担割合」等も一応カバー
+    const rateAlt = normalized.match(/(助成率|負担割合)[：:は]?[^。]+/);
+    if (rateAlt) {
+      result.rate = rateAlt[0].trim();
+    }
+  }
 
-  log.info(
-    `detail summary source=${sourceName} total=${summary.total} fetched=${summary.fetched} ok=${summary.ok}` +
-      ` startHit=${summary.startHit} deadlineHit=${summary.deadlineHit}` +
-      ` rateHit=${summary.rateHit} limitHit=${summary.limitHit} targetHit=${summary.targetHit}`
+  // ========== 上限額 ==========
+  const limitMatch = normalized.match(/(補助上限額|補助上限|上限額|上限|限度額)[：:は]?[^。]+/);
+  if (limitMatch) {
+    result.limit = limitMatch[0].trim();
+  }
+
+  // ========== 募集開始 & 締切 ==========
+  // 「募集期間」「受付期間」「申請期間」「公募期間」などの行を対象にして
+  // その中から日付を 2個取れたら [開始, 締切] とみなす。
+  const periodMatch = normalized.match(
+    /(募集期間|受付期間|申請期間|公募期間|申込期間|募集受付期間)[^。]{0,80}。/
   );
-
-  return summary;
-}
-
-/**
- * 互換用の別名（index.js からいろんな名前で呼ばれても動くようにする）
- * ここに「enrichRecordsWithDetails」を追加するのが今回のポイント。
- */
-export async function enrichRecordsWithDetails(
-  records,
-  src,
-  settings,
-  logger
-) {
-  return enrichDetails(records, src, settings, logger);
-}
-
-export async function fetchDetails(records, src, settings, logger) {
-  return enrichDetails(records, src, settings, logger);
-}
-export async function scrapeDetails(records, src, settings, logger) {
-  return enrichDetails(records, src, settings, logger);
-}
-export async function attachDetails(records, src, settings, logger) {
-  return enrichDetails(records, src, settings, logger);
-}
-
-// default export も同じ関数にしておく
-export default enrichDetails;
-
-/* =========================
- *  以下、ヘルパー関数群
- * =======================*/
-
-/**
- * logger が渡されていればそれを使い、なければ console を使う。
- */
-function createLogger(logger) {
-  if (!logger) return console;
-  if (typeof logger.info === "function") return logger;
-  // ざっくり info / warn / error だけ合わせておく
-  return {
-    info: console.log,
-    warn: console.warn,
-    error: console.error,
-  };
-}
-
-/**
- * ソース行の文字列から安全に RegExp を作る。
- * 無効な正規表現だった場合は null を返す。
- */
-function safePattern(srcValue) {
-  if (!srcValue) return null;
-  const s = String(srcValue).trim();
-  if (!s) return null;
-  try {
-    // ユーザー入力側で /.../ フォーマットを使っていても
-    // 素のパターンだけでも動くよう軽く吸収
-    if (s.startsWith("/") && s.lastIndexOf("/") > 0) {
-      const body = s.slice(1, s.lastIndexOf("/"));
-      const flags = s.slice(s.lastIndexOf("/") + 1) || "g";
-      return new RegExp(body, flags);
+  if (periodMatch) {
+    const periodText = periodMatch[0];
+    const dates = extractAllDates(periodText);
+    if (dates.length >= 2) {
+      result.startDate = dates[0];
+      result.deadline = dates[1];
+    } else if (dates.length === 1) {
+      // 1つしか取れない場合、締切だけ分かるパターンが多いので締切に入れておく
+      result.deadline = dates[0];
     }
-    return new RegExp(s, "g");
-  } catch (_) {
-    return null;
+  }
+
+  // それでも締切が空なら、全体から「〜まで」の近くの1日付を締切として拾う
+  if (!result.deadline) {
+    const untilMatch = normalized.match(/([0-9０-９令和平成昭和].{0,30}まで)/);
+    if (untilMatch) {
+      const dates = extractAllDates(untilMatch[1]);
+      if (dates.length >= 1) {
+        result.deadline = dates[dates.length - 1];
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * テキスト中から「西暦 or 元号付きの日付」を全部抜き出して ISO 形式(YYYY-MM-DD)にする
+ */
+function extractAllDates(text) {
+  const dates = [];
+
+  // 西暦パターン 2025年12月28日 / 2025/12/28 など
+  const westernRe = /(20\d{2})[年\/.-]\s*(\d{1,2})[月\/.-]\s*(\d{1,2})日?/g;
+  let m;
+  while ((m = westernRe.exec(text)) !== null) {
+    const iso = toIsoDate(Number(m[1]), Number(m[2]), Number(m[3]));
+    if (iso) dates.push(iso);
+  }
+
+  // 元号（令和 / 平成 / 昭和）パターン
+  const eraRe = /(令和|平成|昭和)\s*(\d{1,2})年\s*(\d{1,2})月\s*(\d{1,2})日?/g;
+  while ((m = eraRe.exec(text)) !== null) {
+    const year = eraToAD(m[1], Number(m[2]));
+    const iso = toIsoDate(year, Number(m[3]), Number(m[4]));
+    if (iso) dates.push(iso);
+  }
+
+  // 「R7.2.28」みたいな略記も一応拾っておく
+  const shortEraRe = /R(\d{1,2})\.(\d{1,2})\.(\d{1,2})/gi;
+  while ((m = shortEraRe.exec(text)) !== null) {
+    const year = 2018 + Number(m[1]); // R1=2019
+    const iso = toIsoDate(year, Number(m[2]), Number(m[3]));
+    if (iso) dates.push(iso);
+  }
+
+  return dates;
+}
+
+function toIsoDate(year, month, day) {
+  if (!year || !month || !day) return '';
+  try {
+    // JS の Date は月が 0 始まりなので -1 する
+    const d = new Date(Date.UTC(year, month - 1, day));
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toISOString().slice(0, 10);
+  } catch {
+    return '';
   }
 }
 
-function findFirstMatch(text, pattern) {
-  if (!pattern) return "";
-  const m = text.match(pattern);
-  if (!m || !m[0]) return "";
-  return String(m[0]).trim();
-}
-
-/**
- * 募集開始日を抽出
- * 1. ソース行の 募集開始REGEX でヒットした最初の文字列
- * 2. なければ「募集期間」「受付開始」などの行から日付っぽい箇所
- */
-function pickStartDate(text, patternStart) {
-  let v = findFirstMatch(text, patternStart);
-  if (v) return v;
-
-  // 汎用ざっくりロジック
-  const generic =
-    /(募集期間|受付期間|申請期間|募集開始)[^0-9０-９]{0,10}([0-9０-９]{4}年[0-9０-９]{1,2}月[0-9０-９]{1,2}日)/;
-  const m = text.match(generic);
-  if (m && m[2]) return m[2].trim();
-
-  return "";
-}
-
-/**
- * 締切日を抽出
- * 1. ソース行の 締切抽出REGEX でヒットした最初の文字列
- * 2. なければ「締切」「締め切り」「応募期限」などの周辺から日付を拾う
- */
-function pickDeadline(text, patternDeadline) {
-  let v = findFirstMatch(text, patternDeadline);
-  if (v) return v;
-
-  const generic =
-    /(締切|締め切り|応募期限|申請期限)[^0-9０-９]{0,10}([0-9０-９]{4}年[0-9０-９]{1,2}月[0-9０-９]{1,2}日)/;
-  const m = text.match(generic);
-  if (m && m[2]) return m[2].trim();
-
-  return "";
-}
-
-/**
- * 補助率を抽出
- * 例: 「補助率 2/3」「補助率 3/4」「補助率 1/2」「補助率 上限 ○○%」など
- */
-function pickRate(text, patternRate) {
-  let v = findFirstMatch(text, patternRate);
-  if (v) return v;
-
-  const generic =
-    /(補助率[^0-9０-９]{0,5}([0-9０-９]+\/[0-9０-９]+|[0-9０-９]{1,2}％|[0-9０-９]{1,2}%))/;
-  const m = text.match(generic);
-  if (m && m[0]) return m[0].trim();
-
-  return "";
-}
-
-/**
- * 上限額を抽出
- * 例: 「上限 ○○万円」「補助上限額 100万円」「補助金額 上限 50万円」など
- */
-function pickLimit(text, patternLimit) {
-  let v = findFirstMatch(text, patternLimit);
-  if (v) return v;
-
-  const generic =
-    /(上限額|補助上限額|上限)[^0-9０-９]{0,10}([0-9０-９,，]+万円?|[0-9０-９,，]+円)/;
-  const m = text.match(generic);
-  if (m && m[0]) return m[0].trim();
-
-  return "";
-}
-
-/**
- * 対象を抽出
- * 例: 「対象: 中小企業者」「対象事業者: 県内中小企業」など
- */
-function pickTarget(text, patternTarget) {
-  let v = findFirstMatch(text, patternTarget);
-  if (v) return v;
-
-  const generic = /(対象[者者企業]*[:：][^\n\r]+)/;
-  const m = text.match(generic);
-  if (m && m[0]) return m[0].trim();
-
-  return "";
-}
-
-/**
- * サマリオブジェクト作成
- */
-function makeSummary(partial) {
-  return {
-    total: partial.total ?? 0,
-    fetched: partial.fetched ?? 0,
-    ok: partial.ok ?? 0,
-    startHit: partial.startHit ?? 0,
-    deadlineHit: partial.deadlineHit ?? 0,
-    rateHit: partial.rateHit ?? 0,
-    limitHit: partial.limitHit ?? 0,
-    targetHit: partial.targetHit ?? 0,
-  };
+function eraToAD(era, n) {
+  // ざっくり変換（日本の補助金サイトで使う範囲ならこれで十分）
+  if (era === '令和') {
+    return 2018 + n; // R1=2019
+  }
+  if (era === '平成') {
+    return 1988 + n; // H1=1989
+  }
+  if (era === '昭和') {
+    return 1925 + n; // S1=1926
+  }
+  return 2000 + n; // fallback
 }
