@@ -1,76 +1,101 @@
-// 共通ユーティリティ
+// src/utils.js
+// 汎用ユーティリティ関数群（全部 named export）
 
-export function toBool(value) {
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0;
-  if (typeof value === 'string') {
-    const s = value.trim().toLowerCase();
-    if (!s) return false;
-    return ['1', 'true', 'yes', 'y', 'on', 't', 'はい', '有効'].includes(s);
-  }
-  return false;
+// 全角→半角（数字・英字・一部記号）
+// 例: "１２３ＡＢｃ" → "123ABc"
+export function toHan(input = "") {
+  return String(input).replace(/[！-～]/g, ch =>
+    String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
+  );
 }
 
-export function normalizeSpace(str) {
-  return String(str ?? '').replace(/\s+/g, ' ').trim();
-}
-
-export function canonicalizeUrl(href, baseUrl) {
-  if (!href) return '';
-  try {
-    const u = new URL(href, baseUrl);
-    return u.toString();
-  } catch {
-    return '';
-  }
-}
-
-export function shouldSkipHref(href) {
-  if (!href) return true;
-  const h = href.trim();
-  if (!h) return true;
-  if (h.startsWith('#')) return true;
-  if (h.toLowerCase().startsWith('javascript:')) return true;
-  if (h.toLowerCase().startsWith('mailto:')) return true;
-  return false;
-}
-
-// JSTの日付（YYYY-MM-DD）を返す
-export function todayJst() {
-  const now = new Date();
-  // 現地タイムゾーン → JST(UTC+9) への補正
-  const jstMillis = now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000;
-  const jst = new Date(jstMillis);
-  return jst.toISOString().slice(0, 10);
-}
-
-// id 用の短いランダム文字列
-export function randomId(length = 4) {
-  let out = '';
-  while (out.length < length) {
-
-  // HTML文字列からタグを除去してプレーンテキストにするヘルパー
-export function stripTags(html) {
-  if (!html) return '';
-
-  return String(html)
-    // script / style は丸ごと削除
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    // 改行扱いにしたいタグ
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, '\n')
-    // 残りのタグを削除
-    .replace(/<[^>]+>/g, '')
-    // ノーブレークスペースなどを普通のスペースに
-    .replace(/\u00A0/g, ' ')
-    // 連続スペースの圧縮
-    .replace(/[ \t]+/g, ' ')
-    // 連続空行を1つに
-    .replace(/\n\s*\n+/g, '\n')
+// 余計な空白を整理（タブ→スペース、多重スペース→1つ）
+export function normalizeSpace(input = "") {
+  return String(input)
+    .replace(/\s+/g, " ")
     .trim();
 }
-    out += Math.random().toString(36).slice(2);
+
+// HTML からテキストだけを取り出す
+// - <script>, <style> ブロックは丸ごと削除
+// - <br>, </p>, </div>, </li>, </tr>, </h1>〜</h6> は改行扱い
+// - 残りのタグは削除
+export function stripTags(html) {
+  if (!html) return "";
+
+  return String(html)
+    // script / style を除去
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    // 改行扱いのタグ
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n")
+    // 残りのタグを削除
+    .replace(/<[^>]+>/g, "")
+    // ノーブレークスペースなど
+    .replace(/\u00A0/g, " ")
+    // タブなどをスペースに寄せる
+    .replace(/[ \t]+/g, " ")
+    // 連続する空行を1つに
+    .replace(/\n\s*\n+/g, "\n")
+    .trim();
+}
+
+// URL を絶対URLに正規化
+// href が "http..." ならそのまま
+// 相対パスなら baseUrl をもとに解決
+export function canonicalizeUrl(href, baseUrl) {
+  const raw = String(href || "").trim();
+  if (!raw) return "";
+
+  try {
+    // //example.com のようなスキーム省略
+    if (raw.startsWith("//")) {
+      return "https:" + raw;
+    }
+    // すでに http(s) で始まっていればそのまま
+    if (/^https?:\/\//i.test(raw)) {
+      return raw;
+    }
+    if (!baseUrl) return raw;
+    const u = new URL(raw, baseUrl);
+    return u.toString();
+  } catch (e) {
+    return raw;
   }
-  return out.slice(0, length);
+}
+
+// aタグの href として明らかに無視して良いものかどうか
+export function shouldSkipHref(href) {
+  if (!href) return true;
+  const s = String(href).trim();
+  if (!s || s === "#" || s.startsWith("#")) return true;
+  if (s.toLowerCase().startsWith("javascript:")) return true;
+  if (s.toLowerCase().startsWith("mailto:")) return true;
+  if (s.toLowerCase().startsWith("tel:")) return true;
+  return false;
+}
+
+// 文字列を指定長でカット（末尾に "…" を付ける）
+export function truncate(str, maxLen) {
+  const s = String(str || "");
+  const n = Number(maxLen) || 0;
+  if (!n || s.length <= n) return s;
+  return s.slice(0, n - 1) + "…";
+}
+
+// URL からホスト名だけを取り出す
+// 例: https://www.pref.okinawa.lg.jp/... → www.pref.okinawa.lg.jp
+export function hostOf(urlStr) {
+  try {
+    const u = new URL(String(urlStr));
+    return u.host || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+// Promiseベースの sleep（必要なら使う）
+export function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
