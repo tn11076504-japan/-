@@ -48,6 +48,28 @@ export function todayJst() {
 export function randomId(length = 4) {
   let out = '';
   while (out.length < length) {
+
+  // HTML文字列からタグを除去してプレーンテキストにするヘルパー
+export function stripTags(html) {
+  if (!html) return '';
+
+  return String(html)
+    // script / style は丸ごと削除
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    // 改行扱いにしたいタグ
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|h[1-6]|tr)>/gi, '\n')
+    // 残りのタグを削除
+    .replace(/<[^>]+>/g, '')
+    // ノーブレークスペースなどを普通のスペースに
+    .replace(/\u00A0/g, ' ')
+    // 連続スペースの圧縮
+    .replace(/[ \t]+/g, ' ')
+    // 連続空行を1つに
+    .replace(/\n\s*\n+/g, '\n')
+    .trim();
+}
     out += Math.random().toString(36).slice(2);
   }
   return out.slice(0, length);
