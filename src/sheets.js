@@ -19,6 +19,7 @@ const sheets = google.sheets({ version: 'v4', auth });
 
 export { sheets as sheetsClient, SHEET_ID };
 
+// JST の日時文字列（ログ用）
 function nowJstDateTimeString() {
   const now = new Date();
   const jstMillis = now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000;
@@ -26,6 +27,7 @@ function nowJstDateTimeString() {
   return jst.toISOString().replace('T', ' ').slice(0, 19);
 }
 
+// ログ行追加
 async function appendLog(level, message) {
   const ts = nowJstDateTimeString();
   await sheets.spreadsheets.values.append({
@@ -33,7 +35,9 @@ async function appendLog(level, message) {
     range: 'ログ!A:C',
     valueInputOption: 'RAW',
     insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: [[ts, level, message]] },
+    requestBody: {
+      values: [[ts, level, message]],
+    },
   });
 }
 
@@ -76,9 +80,10 @@ export async function appendRecords(records, src) {
     return { adoptedRecords: [] };
   }
 
+  // 案件DB 全体（A〜Q列）を取得して URL 列のインデックスを探す
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: '案件DB!A1:K',
+    range: '案件DB!A1:Q',
   });
   const rows = res.data.values || [];
   const headers = rows[0] || [];
@@ -102,31 +107,66 @@ export async function appendRecords(records, src) {
     const id = randomId();
     adoptedRecords.push({ id, url });
 
+    // ヘッダ名を見ながら 1 行ぶんを組み立てる
     const rowValues = headers.map((h) => {
       switch (h) {
         case 'id':
           return id;
+
         case '取得日':
           return rec['取得日'] || todayJst();
+
         case '県':
           return rec['県'] || src['県'] || '';
+
         case 'タイトル':
           return rec['タイトル'] || '';
+
         case '公募主体':
+          // レコード側 > ソース側 固定主体
           return rec['公募主体'] || src['主体(固定)'] || '';
+
         case '募集開始':
           return rec['募集開始'] || '';
+
         case '締切日':
           return rec['締切日'] || '';
+
         case '補助率':
           return rec['補助率'] || '';
+
         case '上限額':
           return rec['上限額'] || '';
+
         case '対象':
           return rec['対象'] || '';
+
         case 'URL':
           return rec['URL'] || '';
+
+        // 以下 L〜P 列想定（必要なら後でロジック追加）
+        case '重複キー':
+          return '';
+
+        case '新規/更新':
+          return '';
+
+        case 'スコア':
+          return '';
+
+        case '出典':
+          return rec['出典'] || src['名称'] || '';
+
+        case '備考':
+          return '';
+
+        // Q列 「本文」
+        case '本文':
+          // details.js で付与した rec.本文 をそのまま入れる
+          return rec['本文'] || '';
+
         default:
+          // 想定外のヘッダは空で埋める
           return '';
       }
     });
@@ -137,7 +177,7 @@ export async function appendRecords(records, src) {
   if (valuesToAppend.length) {
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
-      range: '案件DB!A1:K',
+      range: '案件DB!A1:Q',
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: valuesToAppend },
