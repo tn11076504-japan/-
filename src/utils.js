@@ -1,78 +1,54 @@
-// src/utils.js
-import { URL } from 'url';
+// 共通ユーティリティ
 
-/**
- * HTML からタグを削除してテキストだけにする
- */
-export function stripTags(html = '') {
-  return String(html)
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-/**
- * 相対 URL を絶対 URL に変換
- */
-export function canonicalizeUrl(href, base) {
-  try {
-    if (!href) return '';
-    const u = new URL(href, base);
-    // #だけのリンクなどは捨てる
-    if (!u.protocol.startsWith('http')) return '';
-    return u.toString();
-  } catch (e) {
-    return '';
+export function toBool(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase();
+    if (!s) return false;
+    return ['1', 'true', 'yes', 'y', 'on', 't', 'はい', '有効'].includes(s);
   }
-}
-
-/**
- * メールリンク・JavaScript など無視したい href を弾く
- */
-export function shouldSkipHref(href = '') {
-  const h = href.trim().toLowerCase();
-  if (!h) return true;
-  if (h.startsWith('#')) return true;
-  if (h.startsWith('javascript:')) return true;
-  if (h.startsWith('mailto:')) return true;
   return false;
 }
 
-/**
- * 文字列を指定長でトリム
- */
-export function truncate(s, maxLen) {
-  const txt = String(s || '');
-  if (txt.length <= maxLen) return txt;
-  return txt.slice(0, maxLen - 1) + '…';
+export function normalizeSpace(str) {
+  return String(str ?? '').replace(/\s+/g, ' ').trim();
 }
 
-/**
- * URL からホスト名だけ取り出す
- */
-export function hostOf(url = '') {
+export function canonicalizeUrl(href, baseUrl) {
+  if (!href) return '';
   try {
-    const u = new URL(url);
-    return u.hostname || '';
-  } catch (e) {
+    const u = new URL(href, baseUrl);
+    return u.toString();
+  } catch {
     return '';
   }
 }
 
-/**
- * JST タイムスタンプ（YYYY-MM-DD HH:MM:SS）
- */
-export function nowJstTimestamp() {
-  const now = new Date();
-  const jst = new Date(now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000);
-  return jst.toISOString().replace('T', ' ').slice(0, 19);
+export function shouldSkipHref(href) {
+  if (!href) return true;
+  const h = href.trim();
+  if (!h) return true;
+  if (h.startsWith('#')) return true;
+  if (h.toLowerCase().startsWith('javascript:')) return true;
+  if (h.toLowerCase().startsWith('mailto:')) return true;
+  return false;
 }
 
-/**
- * JST の日付（YYYY-MM-DD）
- */
-export function todayJstDate() {
+// JSTの日付（YYYY-MM-DD）を返す
+export function todayJst() {
   const now = new Date();
-  const jst = new Date(now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000);
+  // 現地タイムゾーン → JST(UTC+9) への補正
+  const jstMillis = now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000;
+  const jst = new Date(jstMillis);
   return jst.toISOString().slice(0, 10);
+}
+
+// id 用の短いランダム文字列
+export function randomId(length = 4) {
+  let out = '';
+  while (out.length < length) {
+    out += Math.random().toString(36).slice(2);
+  }
+  return out.slice(0, length);
 }
