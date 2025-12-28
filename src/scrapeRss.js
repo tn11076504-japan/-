@@ -1,77 +1,70 @@
-// src/scrapeRss.js
-//
-// RSS / Atom フィードから案件候補を拾う
-//
-
 import axios from 'axios';
 import { XMLParser } from 'fast-xml-parser';
-import { stripTags, canonicalizeUrl, truncate, todayJstDate } from './utils.js';
+import {
+  normalizeSpace,
+  canonicalizeUrl,
+  todayJst,
+} from './utils.js';
 import { extractDeadlineSmart } from './date.js';
 
-const parser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: '@_'
-});
-
-export async function scrapeRss(src, settings, logger) {
-  const url = String(src.url || '').trim();
-  const inRe = new RegExp(String(src.includeIn || settings.FILTER_INCLUDE), 'u');
-  const outRe = new RegExp(String(src.includeOut || settings.FILTER_EXCLUDE), 'u');
-  const mode = String(settings.DEADLINE_MODE || 'SMART');
+export async function scrapeRss(src) {
+  const url = String(src['URL'] || '').trim();
+  const inPattern = String(src['抽出IN'] || '').trim();
+  const outPattern = String(src['抽出OUT'] || '').trim();
+  const includeRe = inPattern ? new RegExp(inPattern) : null;
+  const excludeRe = outPattern ? new RegExp(outPattern) : null;
 
   const res = await axios.get(url, { timeout: 15000 });
-  const xml = parser.parse(res.data);
+  const parser = new XMLParser({ ignoreAttributes: false });
+  const feed = parser.parse(res.data);
 
-  const items = getItems(xml);
-  const recs = [];
+  const items =
+    feed.rss?.channel?.item ||
+    feed.feed?.entry ||
+    [];
 
-  for (const it of items) {
-    const title = it.title || '';
-    const desc = stripTags(it.description || it.content || '');
-    const link = it.link?.['@_href'] || it.link || it.guid || '';
-    const text = `${title} ${desc}`;
+  const records = [];
 
-    if (!inRe.test(text)) continue;
-    if (outRe.test(text)) continue;
+  for (const item of items) {
+    const title = normalizeSpace(item.title?.['#text'] || item.title || '');
+    const desc = normalizeSpace(
+      item.description ||
+        item['content:encoded'] ||
+        item.summary ||
+        '',
+    );
+    const text = `${title} ${desc}`.trim();
+
+    if (!text) continue;
+    if (includeRe && !includeRe.test(text)) continue;
+    if (excludeRe && excludeRe.test(text)) continue;
+
+    const linkVal =
+      item.link?.['@_href'] ||
+      item.link?.['#text'] ||
+      item.link ||
+      item.guid ||
+      '';
+    const link = canonicalizeUrl(String(linkVal), url);
 
     const deadline = extractDeadlineSmart(
       text,
-      src.deadlineRegex || '',
-      mode
+      String(src['締切抽出REGEX'] || '').trim(),
     );
 
-    recs.push({
-      県: src.pref || '',
-      タイトル: truncate(title || desc, 160) || '(無題)',
-      公募主体: src.fixedOrg || '',
+    records.push({
+      県: src['県'] || '',
+      タイトル: title || '(無題)',
+      公募主体: src['主体(固定)'] || '',
       募集開始: '',
-      締切日: deadline || '',
+      締切日: deadline,
       補助率: '',
       上限額: '',
       対象: '',
-      URL: canonicalizeUrl(link, url),
-      出典: src.name || '',
-      取得日: todayJstDate()
+      URL: link,
+      取得日: todayJst(),
     });
   }
 
-  if (logger) {
-    await logger(
-      `source=${src.name} type=rss items=${items.length} recs=${recs.length}`
-    );
-  }
-
-  return recs;
-}
-
-function getItems(xmlRoot) {
-  if (!xmlRoot) return [];
-  if (xmlRoot.rss?.channel?.item) return arr(xmlRoot.rss.channel.item);
-  if (xmlRoot.feed?.entry) return arr(xmlRoot.feed.entry);
-  return [];
-}
-
-function arr(v) {
-  if (!v) return [];
-  return Array.isArray(v) ? v : [v];
+  return records;
 }
