@@ -1,75 +1,68 @@
-// src/scrapeHtml.js
-//
-// HTML リストページを見て、リンクから案件候補を拾う
-//
-
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { stripTags, canonicalizeUrl, shouldSkipHref, truncate, todayJstDate } from './utils.js';
+import {
+  canonicalizeUrl,
+  shouldSkipHref,
+  normalizeSpace,
+  todayJst,
+} from './utils.js';
 import { extractDeadlineSmart } from './date.js';
 
-export async function scrapeHtml(src, settings, logger) {
-  const baseUrl = String(src.url || '').trim();
-  const scopePath = String(src.scopePath || '').trim();
-  const inRe = new RegExp(String(src.includeIn || settings.FILTER_INCLUDE), 'u');
-  const outRe = new RegExp(String(src.includeOut || settings.FILTER_EXCLUDE), 'u');
-  const mode = String(settings.DEADLINE_MODE || 'SMART');
+export async function scrapeHtml(src) {
+  const baseUrl = String(src['URL'] || '').trim();
+  const scopePath = String(src['範囲(パス)'] || '').trim();
+  const inPattern = String(src['抽出IN'] || '').trim();
+  const outPattern = String(src['抽出OUT'] || '').trim();
+  const includeRe = inPattern ? new RegExp(inPattern) : null;
+  const excludeRe = outPattern ? new RegExp(outPattern) : null;
 
   const res = await axios.get(baseUrl, { timeout: 15000 });
   const $ = cheerio.load(res.data);
 
-  const recs = [];
-  let total = 0;
-  let adopted = 0;
+  const seenUrls = new Set();
+  const records = [];
 
   $('a[href]').each((_, a) => {
-    total++;
     const hrefRaw = $(a).attr('href') || '';
     if (shouldSkipHref(hrefRaw)) return;
     const hrefAbs = canonicalizeUrl(hrefRaw, baseUrl);
     if (!hrefAbs) return;
+    if (seenUrls.has(hrefAbs)) return;
+    seenUrls.add(hrefAbs);
 
-    // scopePath がある場合はその配下だけ
     if (scopePath) {
       try {
         const p = new URL(hrefAbs).pathname || '/';
         if (!p.startsWith(scopePath)) return;
-      } catch (_) {}
+      } catch {
+        // ignore URL parse error
+      }
     }
 
-    const text = stripTags($(a).text());
+    const text = normalizeSpace($(a).text());
     if (!text) return;
-    if (!inRe.test(text)) return;
-    if (outRe.test(text)) return;
+
+    if (includeRe && !includeRe.test(text)) return;
+    if (excludeRe && excludeRe.test(text)) return;
 
     const deadline = extractDeadlineSmart(
       text,
-      src.deadlineRegex || '',
-      mode
+      String(src['締切抽出REGEX'] || '').trim(),
     );
 
-    recs.push({
-      県: src.pref || '',
-      タイトル: truncate(text, 160) || '(無題)',
-      公募主体: src.fixedOrg || '',
+    records.push({
+      県: src['県'] || '',
+      タイトル: text || '(無題)',
+      公募主体: src['主体(固定)'] || '',
       募集開始: '',
-      締切日: deadline || '',
+      締切日: deadline,
       補助率: '',
       上限額: '',
       対象: '',
       URL: hrefAbs,
-      出典: src.name || '',
-      取得日: todayJstDate()
+      取得日: todayJst(),
     });
-
-    adopted++;
   });
 
-  if (logger) {
-    await logger(
-      `source=${src.name} type=html total=${total} recs=${recs.length} adopted=${adopted}`
-    );
-  }
-
-  return recs;
+  return records;
 }
