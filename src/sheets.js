@@ -19,6 +19,10 @@ const sheets = google.sheets({ version: 'v4', auth });
 
 export { sheets as sheetsClient, SHEET_ID };
 
+// ==============================
+// ログ関連
+// ==============================
+
 function nowJstDateTimeString() {
   const now = new Date();
   const jstMillis = now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000;
@@ -45,7 +49,10 @@ export async function logWarn(message) {
   return appendLog('WARN', message);
 }
 
-// ソース一覧を読み込む（ヘッダ行をキーにしたオブジェクト配列）
+// ==============================
+// ソース読み込み
+// ==============================
+
 export async function loadSources() {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
@@ -69,10 +76,15 @@ export async function loadSources() {
   return out;
 }
 
-// 案件DB への追加（URL重複はスキップ）
-// 戻り値: { adoptedRecords: [{ id, url }, ...] }
+// ==============================
+// 案件DBへの追加
+// ==============================
+
 export async function appendRecords(records, src) {
   if (!records || records.length === 0) {
+    await logInfo(
+      `source=${src['名称']} type=${src['タイプ']} total=0 adopted=0`,
+    );
     return { adoptedRecords: [] };
   }
 
@@ -149,4 +161,61 @@ export async function appendRecords(records, src) {
   );
 
   return { adoptedRecords };
+}
+
+// ==============================
+// Q列「本文」バックフィル用
+// ==============================
+
+// Q列を「本文」として扱う前提。
+// URL があり、「本文」が空 or "空欄" の行を上から順に limit 件だけ返す。
+export async function findRecordsNeedingBody(limit = 20) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: '案件DB!A1:Q',
+  });
+  const rows = res.data.values || [];
+  if (rows.length === 0) return [];
+
+  const headers = rows[0] || [];
+  const urlIdx = headers.indexOf('URL');
+  const bodyIdx = headers.indexOf('本文');
+  if (urlIdx === -1 || bodyIdx === -1) {
+    throw new Error('案件DB シートに URL または 本文 列がありません');
+  }
+
+  const targets = [];
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i] || [];
+    const url = row[urlIdx];
+    const body = row[bodyIdx];
+
+    if (url && (!body || body === '空欄')) {
+      targets.push({
+        rowNumber: i + 1, // 1-based
+        url,
+      });
+      if (targets.length >= limit) break;
+    }
+  }
+
+  return targets;
+}
+
+// findRecordsNeedingBody で拾った行に対して、本文明を一括で書き込む
+export async function writeBodies(targets) {
+  if (!targets || targets.length === 0) return;
+
+  const data = targets.map((t) => ({
+    range: `案件DB!Q${t.rowNumber}`,
+    values: [[t.body ?? '空欄']],
+  }));
+
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    requestBody: {
+      valueInputOption: 'RAW',
+      data,
+    },
+  });
 }
