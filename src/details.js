@@ -4,8 +4,9 @@ import { stripTags } from './utils.js';
 import { sheetsClient, SHEET_ID, logInfo, logWarn } from './sheets.js';
 
 // 1回の本文バックフィル件数の上限
-// 必要に応じて 50 や 200 に増やせば、一気に埋めることもできます。
-const BODY_BACKFILL_LIMIT = 100;
+// いまは「ほぼ全件を一気に埋めたい」前提で十分大きめの値にしておく
+// （案件DB の行数が 1,000 行とかになってきたら、負荷を見て調整）
+const BODY_BACKFILL_LIMIT = 1000;
 
 /**
  * 指定URLからHTMLを取得し、テキスト本文だけを抽出して返す。
@@ -73,7 +74,7 @@ export async function backfillBodiesFromSheet() {
     const body = row[bodyColIndex] || '';
 
     if (!url) continue;
-    // すでに本文が入っている行はスキップ（'空欄' もバックフィル対象）
+    // すでに本文が入っている行はスキップ（'空欄' はバックフィル対象）
     if (body && body !== '空欄') continue;
 
     targets.push({
