@@ -7,9 +7,33 @@ import {
   findRecordsNeedingBody,
   writeBodies,
 } from './sheets.js';
-import { scrapeHtmlSource } from './scrapeHtml.js';
-import { scrapeRssSource } from './scrapeRss.js';
+import * as htmlModule from './scrapeHtml.js';
+import * as rssModule from './scrapeRss.js';
 import { fetchBodyText } from './details.js';
+
+// ==============================
+// scrapeHtml.js / scrapeRss.js から
+// 実際のスクレイパー関数を解決するヘルパ
+// ==============================
+
+function resolveHtmlScraper() {
+  // どれか一つでも定義されていればそれを採用
+  return (
+    htmlModule.scrapeHtmlSource ||
+    htmlModule.scrapeHtml ||
+    htmlModule.default ||
+    null
+  );
+}
+
+function resolveRssScraper() {
+  return (
+    rssModule.scrapeRssSource ||
+    rssModule.scrapeRss ||
+    rssModule.default ||
+    null
+  );
+}
 
 // ==============================
 // メインのスクレイピング処理
@@ -23,15 +47,37 @@ async function scrapeAllSources() {
 
   let totalAdopted = 0;
 
+  const htmlScraper = resolveHtmlScraper();
+  const rssScraper = resolveRssScraper();
+
+  if (!htmlScraper) {
+    await logWarn('scrapeHtml.js から HTML 用スクレイパー関数を解決できませんでした');
+  }
+  if (!rssScraper) {
+    await logWarn('scrapeRss.js から RSS 用スクレイパー関数を解決できませんでした');
+  }
+
   for (const src of activeSources) {
     try {
       const type = (src['タイプ'] || '').toLowerCase();
       let records = [];
 
       if (type === 'html') {
-        records = await scrapeHtmlSource(src);
+        if (!htmlScraper) {
+          await logWarn(
+            `source=${src['名称']} HTMLスクレイパー未定義のためスキップ`,
+          );
+          continue;
+        }
+        records = await htmlScraper(src);
       } else if (type === 'rss') {
-        records = await scrapeRssSource(src);
+        if (!rssScraper) {
+          await logWarn(
+            `source=${src['名称']} RSSスクレイパー未定義のためスキップ`,
+          );
+          continue;
+        }
+        records = await rssScraper(src);
       } else {
         await logWarn(
           `source=${src['名称']} 未対応タイプ type=${src['タイプ']}`,
@@ -91,7 +137,7 @@ async function main() {
   await scrapeAllSources();
   await logInfo('scrape done');
 
-  // スクレイピングのついでに、毎回少しずつ既存レコードの本文も埋めていく
+  // スクレイピング後に、既存レコードの本文を少しずつ埋めていく
   await backfillBodiesOnce(20);
 }
 
