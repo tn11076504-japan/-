@@ -4,8 +4,7 @@ import { stripTags } from './utils.js';
 import { sheetsClient, SHEET_ID, logInfo, logWarn } from './sheets.js';
 
 // 1回の本文バックフィル件数の上限
-// いまは「ほぼ全件を一気に埋めたい」前提で十分大きめの値にしておく
-// （案件DB の行数が 1,000 行とかになってきたら、負荷を見て調整）
+// 今は実質「全件」扱いになるよう十分大きくしておく
 const BODY_BACKFILL_LIMIT = 1000;
 
 /**
@@ -23,11 +22,10 @@ export async function fetchBodyText(url) {
   const html = await res.text();
   const rawText = stripTags(html) || '';
 
-  // 改行やタブをまとめて、1行テキストに近い形に整える
+  // 改行やタブなどの空白をまとめて 1 個に
   const normalized = rawText.replace(/\s+/g, ' ').trim();
 
-  // Googleスプレッドシートの1セルは ~5万文字程度が上限なので、
-  // 余裕をもって4万字でカット。
+  // Google スプレッドシート 1 セルの実質上限を考慮して 4万字でカット
   const MAX_LEN = 40000;
   if (normalized.length > MAX_LEN) {
     return normalized.slice(0, MAX_LEN);
@@ -40,6 +38,7 @@ export async function fetchBodyText(url) {
  * URL列（K列）のURLから本文を取得してQ列に書き込むバックフィル処理。
  *
  * 1回の実行では BODY_BACKFILL_LIMIT 件まで処理する。
+ * ただし候補の総数（totalCandidates）は全行見た上でログに出す。
  */
 export async function backfillBodiesFromSheet() {
   // 案件DBの A〜Q 列を全部取得（1行目はヘッダ）
@@ -66,45 +65,49 @@ export async function backfillBodiesFromSheet() {
     return;
   }
 
-  // Q列が空（または '空欄'）で、URLが入っている行だけを対象にする
-  const targets = [];
+  // 全行スキャンして「候補」をまず全部集める
+  const candidates = [];
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i] || [];
-    const url = row[urlColIndex] || '';
-    const body = row[bodyColIndex] || '';
 
-    if (!url) continue;
+    const url = (row[urlColIndex] || '').toString().trim();
+    // Q列の値は trim してから判定（スペースだけ入っている場合の対策）
+    const bodyRaw = (row[bodyColIndex] || '').toString();
+    const body = bodyRaw.trim();
+
+    if (!url) continue; // URL が空なら対象外
+
     // すでに本文が入っている行はスキップ（'空欄' はバックフィル対象）
     if (body && body !== '空欄') continue;
 
-    targets.push({
+    candidates.push({
       rowIndex: i + 1, // シートの行番号（1始まり）
       url,
     });
-
-    if (targets.length >= BODY_BACKFILL_LIMIT) break;
   }
 
-  await logInfo(
-    `detail: 本文バックフィル開始 count=${targets.length}`
-  );
-
-  if (targets.length === 0) {
+  if (candidates.length === 0) {
+    await logInfo('detail: 本文バックフィル候補なし');
     return;
   }
 
+  // 今回実際に処理する件数
+  const toProcess = candidates.slice(0, BODY_BACKFILL_LIMIT);
+
+  await logInfo(
+    `detail: 本文バックフィル開始 totalCandidates=${candidates.length} willProcess=${toProcess.length}`
+  );
+
   let updatedCount = 0;
 
-  for (const t of targets) {
+  for (const t of toProcess) {
     try {
       const text = await fetchBodyText(t.url);
       const value = text || '空欄';
 
       await sheetsClient.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
-        range: `案件DB!${columnNumberToLetter(
-          bodyColIndex + 1
-        )}${t.rowIndex}`,
+        range: `案件DB!${columnNumberToLetter(bodyColIndex + 1)}${t.rowIndex}`,
         valueInputOption: 'RAW',
         requestBody: {
           values: [[value]],
@@ -113,6 +116,8 @@ export async function backfillBodiesFromSheet() {
 
       updatedCount++;
     } catch (err) {
+      // 404 やネットワークエラーなど
+      // 必要なら Q 列にも「ERROR: ...」と書き込むこともできる
       await logWarn(
         `detail: fetchBody error url=${t.url} msg=${err.message}`
       );
