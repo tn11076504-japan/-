@@ -5,7 +5,7 @@ import { sheetsClient, SHEET_ID, logInfo, logWarn } from './sheets.js';
 
 // 1回の本文バックフィル件数の上限
 // 必要に応じて 50 や 200 に増やせば、一気に埋めることもできます。
-const BODY_BACKFILL_LIMIT = 20;
+const BODY_BACKFILL_LIMIT = 100;
 
 /**
  * 指定URLからHTMLを取得し、テキスト本文だけを抽出して返す。
