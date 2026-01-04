@@ -6,12 +6,12 @@
 //
 // 特徴:
 // - axios の validateStatus を使って 404/5xx でも throw させず、WARN ログだけ出して続行
-// - HTML パースは cheerio を使用
+// - HTML パースは cheerio を使用（ESM なので `import * as cheerio`）
 // - まずは「補助金・助成・支援・公募」などのキーワードを含むリンクだけを拾う
-// - 補助率・上限額・対象などはここでは入れず、あとで本文(Q列)からバックフィルする想定
+// - 補助率などの細かい項目は、あとで本文(Q列)からバックフィルする想定
 
 import axios from 'axios';
-import cheerio from 'cheerio';
+import * as cheerio from 'cheerio';              // ← ここを修正
 import { appendRecords, logInfo, logWarn } from './sheets.js';
 
 /**
@@ -184,7 +184,6 @@ export async function scrapeHtmlSource(src) {
 
   if (!links || links.length === 0) {
     await logInfo(`scrapeHtml: no subsidy-like links found name=${name}`);
-    // appendRecords 内でのログに加えて、ここでも念のため情報ログ
     return;
   }
 
@@ -194,7 +193,7 @@ export async function scrapeHtmlSource(src) {
     title: item.title,
     url: item.url,
     // ここではまだ細かいメタは入れない。
-    owner: '',      // 公募主体は後で本文から抽出する or src['主体(固定)'] を sheets 側で補完
+    owner: '',      // 公募主体は後で本文から抽出 or src['主体(固定)'] を sheets 側で補完
     startDate: '',  // 募集開始日 → 後で本文(Q列)から抽出する想定
     endDate: '',    // 締切日      → 同上
     rate: '',       // 補助率      → 同上
