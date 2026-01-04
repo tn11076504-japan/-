@@ -1,5 +1,5 @@
 import { google } from 'googleapis';
-import { todayJst, randomId } from './utils.js';
+import { getJstNow, formatJstDateTime } from './utils.js';
 
 const SHEET_ID = process.env.SHEET_ID;
 const SA_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
