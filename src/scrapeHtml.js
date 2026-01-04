@@ -1,170 +1,206 @@
 // src/scrapeHtml.js
 //
-// 「ソース」シート 1 行分のオブジェクト src を受け取り、
-// type=html のソースをスクレイピングして
-// 案件DB に突っ込む用のレコード配列を返す。
+// 各 HTML ソース（ソースシートの「タイプ=html」の行）から
+// 「タイトル＋URL（＋最低限のメタ）」だけを抽出して
+// 案件DB シートに追記する処理。
 //
-// 404 などのエラー URL が混ざっていても、
-// 例外で落ちずに WARN ログを出してスキップするようにしている。
+// 特徴:
+// - axios の validateStatus を使って 404/5xx でも throw させず、WARN ログだけ出して続行
+// - HTML パースは cheerio を使用
+// - まずは「補助金・助成・支援・公募」などのキーワードを含むリンクだけを拾う
+// - 補助率・上限額・対象などはここでは入れず、あとで本文(Q列)からバックフィルする想定
 
 import axios from 'axios';
-import * as cheerio from 'cheerio';
-import { todayJst } from './utils.js';
-import { logInfo, logWarn } from './sheets.js';
+import cheerio from 'cheerio';
+import { appendRecords, logInfo, logWarn } from './sheets.js';
 
 /**
- * axios 共通設定
- * - タイムアウト
- * - 404 を含め HTTP ステータスで reject させない
+ * HTML を取得する共通関数。
+ * - validateStatus で 2xx 以外でも例外は投げない
+ * - 4xx/5xx の場合は WARN ログを出して null を返す
  */
-const http = axios.create({
-  timeout: 15000,
-  responseType: 'text',
-  validateStatus: () => true, // 404 でも throw させない
-});
-
-/**
- * 安全に GET するラッパー。
- * - ネットワーク例外は catch して WARN ログに出し、null を返す
- * - HTTP 2xx 以外は WARN ログに出し、null を返す
- */
-async function safeGet(url, label) {
+async function fetchHtml(url, sourceName) {
   try {
-    const res = await http.get(url);
+    const res = await axios.get(url, {
+      responseType: 'text',
+      // どんなステータスコードでも一旦レスポンスを返す
+      validateStatus: () => true,
+    });
 
-    if (res.status < 200 || res.status >= 300) {
+    if (res.status >= 400) {
       await logWarn(
-        `scrapeHtml: HTTP ${res.status} url=${url} label=${label ?? ''}`
+        `scrapeHtml: HTTP ${res.status} url=${url} source=${sourceName}`
       );
+      // 404 などは null を返して呼び出し元でスキップ
       return null;
     }
 
-    return res.data || '';
+    return res.data;
   } catch (err) {
     await logWarn(
-      `scrapeHtml: request error url=${url} label=${label ?? ''} msg=${
-        err?.message || err
-      }`
+      `scrapeHtml: fetch error url=${url} source=${sourceName} msg=${err.message}`
     );
     return null;
   }
 }
 
 /**
- * 公開インターフェース：
- * ソース 1 件分を受け取り、レコード配列を返す。
- *
- * 返すレコードのキーは appendRecords() が期待しているもの：
- *  - 取得日
- *  - 県
- *  - タイトル
- *  - 公募主体
- *  - 募集開始
- *  - 締切日
- *  - 補助率
- *  - 上限額
- *  - 対象
- *  - URL
+ * テキストの正規化（連続する空白を 1 個に・前後の空白削除）
  */
-export async function scrapeHtmlSource(src) {
-  const type = src['タイプ'] || '';
-  if (type !== 'html') {
-    // html 以外はここでは扱わない
-    return [];
-  }
-
-  const name = src['名称'] || '';
-  try {
-    // いま対応しているのは O-RIC ニュース系のみ。
-    // 必要に応じてここに if / switch でソース別ロジックを追加する。
-    if (name.includes('O-RIC')) {
-      return await scrapeOricNews(src);
-    }
-
-    // 未対応の html ソース
-    await logWarn(`scrapeHtml: 未対応の html ソース name=${name}`);
-    return [];
-  } catch (err) {
-    // 想定外の例外が出てもジョブを落とさない
-    await logWarn(
-      `scrapeHtml: fatal error source=${name} msg=${err?.message || err}`
-    );
-    return [];
-  }
+function normalizeText(text) {
+  if (!text) return '';
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 /**
- * O-RIC ニュース（補助金関連を含む）用スクレイパ
+ * 指定 HTML から「補助金関連ぽいリンク」を抽出する汎用パーサ。
  *
- * 前提：
- * - ソース行に
- *    一覧URL → src["一覧URL"] もしくは src["URL"]
- *    県固定  → src["県"] または src["県(固定)"]
- *    主体固定→ src["主体(固定)"]
- *   が入っている想定。
- *
- * やっていること：
- * - 一覧ページから「/news/info/」または「/news/entry/」へ飛ぶ a タグを拾う
- * - a タグのテキストをタイトルとして採用
- * - 詳細ページまでは取りに行かない（本文は details.js 側で backfill）
+ * ロジック:
+ * - <a> タグを全部舐める
+ * - タイトル文字列に「補助」「助成」「支援」「公募」「補償」などの
+ *   キーワードが含まれているものだけ採用
+ * - href を絶対 URL に整形
  */
-async function scrapeOricNews(src) {
-  const listUrl = src['一覧URL'] || src['URL'];
-  if (!listUrl) {
-    await logWarn('scrapeHtml: O-RIC ソースに URL/一覧URL がありません');
-    return [];
-  }
-
-  const html = await safeGet(listUrl, 'O-RIC list');
-  if (!html) {
-    // 404 などで取得できなかった
-    return [];
-  }
-
+function extractSubsidyLinksGeneric(html, baseUrl) {
   const $ = cheerio.load(html);
-  const base = new URL(listUrl);
 
-  const records = [];
+  const results = [];
+  const seen = new Set();
 
-  // O-RIC の構造にそこそこマッチしつつ、余計なリンクはなるべく避けるため、
-  // main 要素近辺の a タグのうち、href に /news/info/ または /news/entry/ を含むものだけ拾う。
-  $('main a, #main a, .contents a').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const text = $(el).text().trim();
+  $('a').each((_, el) => {
+    const rawTitle = $(el).text();
+    const title = normalizeText(rawTitle);
+    if (!title) return;
 
-    if (!href) return;
-    if (!text) return;
-
-    // 補助金ニュースだけを狙って /news/info/ or /news/entry/ に絞る
-    if (!href.includes('/news/info/') && !href.includes('/news/entry/')) {
+    // 補助金関連っぽいキーワード
+    if (!/[補助金補助|助成|支援|補償|公募|募集]/.test(title)) {
       return;
     }
+
+    let href = $(el).attr('href') || '';
+    href = href.trim();
+    if (!href) return;
+
+    // メールリンク等は除外
+    if (href.startsWith('mailto:') || href.startsWith('tel:')) return;
+
+    // 絶対 URL へ
+    let url;
+    try {
+      url = new URL(href, baseUrl).toString();
+    } catch {
+      return;
+    }
+
+    if (seen.has(url)) return;
+    seen.add(url);
+
+    results.push({ title, url });
+  });
+
+  return results;
+}
+
+/**
+ * O-RIC ニュース用のパーサ。
+ *
+ * 現状の HTML 構造を直接は見れていないため、
+ *   - /news/info/ または /news/entry/
+ * を含むリンクだけに限定した上で、
+ * 上記の補助金キーワードフィルタを適用する方式にしています。
+ */
+function extractOricNewsLinks(html, baseUrl) {
+  const $ = cheerio.load(html);
+
+  const results = [];
+  const seen = new Set();
+
+  $('a[href*="/news/info/"], a[href*="/news/entry/"]').each((_, el) => {
+    const rawTitle = $(el).text();
+    const title = normalizeText(rawTitle);
+    if (!title) return;
+
+    if (!/[補助金補助|助成|支援|補償|公募|募集]/.test(title)) {
+      return;
+    }
+
+    let href = $(el).attr('href') || '';
+    href = href.trim();
+    if (!href) return;
+
+    if (href.startsWith('mailto:') || href.startsWith('tel:')) return;
 
     let url;
     try {
-      url = new URL(href, base).href;
+      url = new URL(href, baseUrl).toString();
     } catch {
-      // 不正な URL はスキップ
       return;
     }
 
-    records.push({
-      取得日: todayJst(),
-      県: src['県'] || src['県(固定)'] || '',
-      タイトル: text,
-      公募主体: src['公募主体'] || src['主体(固定)'] || '',
-      募集開始: '',
-      締切日: '',
-      補助率: '',
-      上限額: '',
-      対象: '',
-      URL: url,
-    });
+    if (seen.has(url)) return;
+    seen.add(url);
+
+    results.push({ title, url });
   });
 
-  await logInfo(
-    `scrapeHtml: O-RIC ニュース name=${src['名称'] || ''} total=${records.length}`
-  );
+  return results;
+}
 
-  return records;
+/**
+ * 1つのソース（ソースシートの1行分）に対して HTML スクレイピングを実行し、
+ * 案件DB シートにレコードを追加するメイン関数。
+ *
+ * index.js から
+ *   import { scrapeHtmlSource } from './scrapeHtml.js';
+ * として呼び出される前提。
+ */
+export async function scrapeHtmlSource(src) {
+  const name = (src['名称'] || '').trim();
+  const listUrl =
+    (src['URL'] || src['一覧URL'] || src['リストURL'] || '').trim();
+
+  if (!listUrl) {
+    await logWarn(
+      `scrapeHtml: URL 未設定の html ソースをスキップします name=${name}`
+    );
+    return;
+  }
+
+  const html = await fetchHtml(listUrl, name);
+  if (!html) {
+    // 404 などで HTML が取れなかった場合はここで終了
+    return;
+  }
+
+  let links;
+
+  // ソース名でざっくり切り替え（必要に応じて case を増やす）
+  if (name.includes('O-RIC') || name.includes('O-RICニュース')) {
+    links = extractOricNewsLinks(html, listUrl);
+  } else {
+    // それ以外は汎用パーサ
+    links = extractSubsidyLinksGeneric(html, listUrl);
+  }
+
+  if (!links || links.length === 0) {
+    await logInfo(`scrapeHtml: no subsidy-like links found name=${name}`);
+    // appendRecords 内でのログに加えて、ここでも念のため情報ログ
+    return;
+  }
+
+  // appendRecords が URL で重複チェックする前提で、
+  // ここでは最低限のフィールドだけ埋めて渡す。
+  const records = links.map((item) => ({
+    title: item.title,
+    url: item.url,
+    // ここではまだ細かいメタは入れない。
+    owner: '',      // 公募主体は後で本文から抽出する or src['主体(固定)'] を sheets 側で補完
+    startDate: '',  // 募集開始日 → 後で本文(Q列)から抽出する想定
+    endDate: '',    // 締切日      → 同上
+    rate: '',       // 補助率      → 同上
+    limit: '',      // 上限額      → 同上
+    target: '',     // 対象        → 同上
+  }));
+
+  await appendRecords(records, src);
 }
