@@ -1,11 +1,6 @@
 // src/sheets.js
 import { google } from 'googleapis';
-import {
-  getJstNow,
-  formatJstDateTime,
-  todayJst,
-  randomId,
-} from './utils.js';
+import { getJstNow, formatJstDateTime } from './utils.js';
 
 const SHEET_ID = process.env.SHEET_ID;
 const SA_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -26,14 +21,35 @@ const sheets = google.sheets({ version: 'v4', auth });
 export { sheets as sheetsClient, SHEET_ID };
 
 // ==============================
+// ローカルユーティリティ
+// ==============================
+
+// JST の「今日」のみ（例: 2025/12/28）
+function todayJst() {
+  const now = getJstNow(); // utils.js から取得（JST）
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}/${m}/${d}`;
+}
+
+// 4文字程度のランダムID（案件DBの id 用）
+function randomId(length = 4) {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let out = '';
+  for (let i = 0; i < length; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
+
+// ==============================
 // ログ関連（JST で統一）
 // ==============================
 
 async function appendLog(level, message) {
-  // ❶ JST の現在時刻を取得
   const jstNow = getJstNow();
-  // ❷ 'YYYY-MM-DD HH:mm:ss' 形式に整形
-  const ts = formatJstDateTime(jstNow);
+  const ts = formatJstDateTime(jstNow); // 'YYYY-MM-DD HH:mm:ss' 想定
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
@@ -128,6 +144,7 @@ export async function appendRecords(records, src) {
         case 'id':
           return id;
         case '取得日':
+          // 取得日がスクレイピング結果にあれば優先、なければ「今日（JST）」
           return rec['取得日'] || todayJst();
         case '県':
           return rec['県'] || src['県'] || '';
