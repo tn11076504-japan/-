@@ -2,15 +2,10 @@
 import fetch from 'node-fetch';
 import { stripTags } from './utils.js';
 import { sheetsClient, SHEET_ID, logInfo, logWarn } from './sheets.js';
-import { extractSubsidyInfo } from './textExtract.js';
 
 // 1回の本文バックフィル件数の上限
-// （URL→本文テキスト(Q列)を埋める処理）
+// いまは「ほぼ全件を一気に埋めたい」想定で大きめ
 const BODY_BACKFILL_LIMIT = 1000;
-
-// 1回のメタ情報バックフィル件数の上限
-// （本文(Q列)→補助率/上限額/対象(H/I/J列)を埋める処理）
-const META_BACKFILL_LIMIT = 300;
 
 /**
  * 指定URLからHTMLを取得し、テキスト本文だけを抽出して返す。
@@ -24,11 +19,21 @@ export async function fetchBodyText(url) {
     throw new Error(`HTTP ${res.status} for ${url}`);
   }
 
-  const html = await res.text();
+  let html = await res.text();
+
+  // 段落・行区切りになるタグを、タグ除去前に改行へ変換
+  html = html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n');
+
   const rawText = stripTags(html) || '';
 
-  // 改行やタブをまとめて、1行テキストに近い形に整える
-  const normalized = rawText.replace(/\s+/g, ' ').trim();
+  // 改行は残したまま、空白・タブだけを整理
+  const normalized = rawText
+    .replace(/\r/g, '')             // CR は削除
+    .replace(/[ \t]+/g, ' ')        // スペースとタブを1つに
+    .replace(/\n{3,}/g, '\n\n')     // 改行3連以上は2連に圧縮
+    .trim();
 
   // Googleスプレッドシートの1セルは ~5万文字程度が上限なので、
   // 余裕をもって4万字でカット。
@@ -70,7 +75,6 @@ export async function backfillBodiesFromSheet() {
     return;
   }
 
-  // Q列が空（または '空欄'）で、URLが入っている行だけを対象にする
   const targets = [];
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i] || [];
@@ -78,8 +82,7 @@ export async function backfillBodiesFromSheet() {
     const body = row[bodyColIndex] || '';
 
     if (!url) continue;
-    // すでに本文が入っている行はスキップ（'空欄' もバックフィル対象）
-    if (body && body !== '空欄') continue;
+    if (body && body !== '空欄') continue; // 既に本文ありならスキップ
 
     targets.push({
       rowIndex: i + 1, // シートの行番号（1始まり）
@@ -125,117 +128,6 @@ export async function backfillBodiesFromSheet() {
 
   await logInfo(
     `detail: 本文バックフィル完了 updated=${updatedCount}`
-  );
-}
-
-/**
- * 本文(Q列)をもとに、補助率(H列) / 上限額(I列) / 対象(J列) を
- * できる範囲で自動補完するバックフィル処理。
- *
- * 1回の実行では META_BACKFILL_LIMIT 件まで処理する。
- */
-export async function backfillMetaFromBody() {
-  const range = '案件DB!A1:Q';
-  const res = await sheetsClient.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range,
-  });
-
-  const rows = res.data.values || [];
-  if (rows.length <= 1) {
-    await logInfo('detail: 案件DBにデータ行がありません(meta)');
-    return;
-  }
-
-  const headers = rows[0];
-  const bodyColIndex = headers.indexOf('本文');
-  const rateColIndex = headers.indexOf('補助率');
-  const limitColIndex = headers.indexOf('上限額');
-  const targetColIndex = headers.indexOf('対象');
-
-  if (
-    bodyColIndex === -1 ||
-    rateColIndex === -1 ||
-    limitColIndex === -1 ||
-    targetColIndex === -1
-  ) {
-    await logWarn(
-      'detail: 案件DBシートに 本文/補助率/上限額/対象 のいずれかが見つかりません(meta)'
-    );
-    return;
-  }
-
-  const updates = [];
-  const touchedRows = new Set();
-
-  for (let i = 1; i < rows.length; i++) {
-    if (touchedRows.size >= META_BACKFILL_LIMIT) break;
-
-    const row = rows[i] || [];
-    const body = row[bodyColIndex] || '';
-
-    if (!body || body === '空欄') continue;
-
-    const currentRate = row[rateColIndex] || '';
-    const currentLimit = row[limitColIndex] || '';
-    const currentTarget = row[targetColIndex] || '';
-
-    // すでに全部埋まっているならスキップ
-    if (currentRate && currentLimit && currentTarget) continue;
-
-    const info = extractSubsidyInfo(body);
-
-    const rowIndex = i + 1;
-    let changed = false;
-
-    if (!currentRate && info.rate) {
-      updates.push({
-        range: `案件DB!${columnNumberToLetter(rateColIndex + 1)}${rowIndex}`,
-        values: [[info.rate]],
-      });
-      changed = true;
-    }
-
-    if (!currentLimit && info.limit) {
-      updates.push({
-        range: `案件DB!${columnNumberToLetter(limitColIndex + 1)}${rowIndex}`,
-        values: [[info.limit]],
-      });
-      changed = true;
-    }
-
-    if (!currentTarget && info.target) {
-      updates.push({
-        range: `案件DB!${columnNumberToLetter(targetColIndex + 1)}${rowIndex}`,
-        values: [[info.target]],
-      });
-      changed = true;
-    }
-
-    if (changed) {
-      touchedRows.add(rowIndex);
-    }
-  }
-
-  await logInfo(
-    `detail: メタ情報バックフィル開始 rows=${touchedRows.size} updates=${updates.length}`
-  );
-
-  if (updates.length === 0) {
-    await logInfo('detail: メタ情報バックフィル対象なし');
-    return;
-  }
-
-  await sheetsClient.spreadsheets.values.batchUpdate({
-    spreadsheetId: SHEET_ID,
-    requestBody: {
-      valueInputOption: 'RAW',
-      data: updates,
-    },
-  });
-
-  await logInfo(
-    `detail: メタ情報バックフィル完了 updatedRows=${touchedRows.size}`
   );
 }
 
