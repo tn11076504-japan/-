@@ -1,124 +1,179 @@
 // src/utils.js
-// 汎用ユーティリティ関数（全部 named export）
 
-// 全角→半角（数字・英字・一部記号）
-export function toHan(input = "") {
-  return String(input).replace(/[！-～]/g, ch =>
-    String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)
+/**
+ * ごく基本的な HTML エンティティをデコードする簡易関数。
+ * 外部ライブラリは使わない。
+ */
+function decodeHtmlEntities(str) {
+  if (!str) return '';
+
+  const map = {
+    '&nbsp;': ' ',
+    '&#160;': ' ',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&amp;': '&',
+    '&quot;': '"',
+    '&#39;': "'",
+  };
+
+  let result = str.replace(
+    /(&nbsp;|&#160;|&lt;|&gt;|&amp;|&quot;|&#39;)/g,
+    (m) => map[m] || m
   );
+
+  // 数値参照 &#1234; / &#x1F600; にも対応
+  result = result
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) =>
+      String.fromCharCode(parseInt(hex, 16))
+    )
+    .replace(/&#(\d+);/g, (_, num) =>
+      String.fromCharCode(parseInt(num, 10))
+    );
+
+  return result;
 }
 
-// 余計な空白を整理
-export function normalizeSpace(input = "") {
-  return String(input)
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// HTML からテキストだけを取り出す
+/**
+ * HTML から script/style/コメント/タグを削除し、生テキストだけにする。
+ * 文字化けを減らしつつ、余計な改行・空白も整理する。
+ */
 export function stripTags(html) {
-  if (!html) return "";
+  if (!html) return '';
 
-  return String(html)
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/\u00A0/g, " ")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n\s*\n+/g, "\n")
-    .trim();
+  let text = String(html);
+
+  // script, style, コメントを除去
+  text = text.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+  text = text.replace(/<style[\s\S]*?<\/style>/gi, ' ');
+  text = text.replace(/<!--[\s\S]*?-->/g, ' ');
+
+  // それ以外のタグを除去
+  text = text.replace(/<[^>]+>/g, ' ');
+
+  // エンティティ→プレーンテキスト
+  text = decodeHtmlEntities(text);
+
+  // 連続する空白・改行をまとめる
+  return text.replace(/\s+/g, ' ').trim();
 }
 
-// 相対URLを絶対URLに正規化
-export function canonicalizeUrl(href, baseUrl) {
-  const raw = String(href || "").trim();
-  if (!raw) return "";
-
-  try {
-    if (raw.startsWith("//")) {
-      return "https:" + raw;
-    }
-    if (/^https?:\/\//i.test(raw)) {
-      return raw;
-    }
-    if (!baseUrl) return raw;
-    const u = new URL(raw, baseUrl);
-    return u.toString();
-  } catch (_) {
-    return raw;
-  }
-}
-
-// aタグの href としてスキップすべきか
-export function shouldSkipHref(href) {
-  if (!href) return true;
-  const s = String(href).trim();
-  if (!s || s === "#" || s.startsWith("#")) return true;
-  const lower = s.toLowerCase();
-  if (lower.startsWith("javascript:")) return true;
-  if (lower.startsWith("mailto:")) return true;
-  if (lower.startsWith("tel:")) return true;
-  return false;
-}
-
-// 指定長でカットして末尾に "…" を付ける
-export function truncate(str, maxLen) {
-  const s = String(str || "");
-  const n = Number(maxLen) || 0;
-  if (!n || s.length <= n) return s;
-  return s.slice(0, n - 1) + "…";
-}
-
-// URL からホスト名を取り出す
-export function hostOf(urlStr) {
-  try {
-    const u = new URL(String(urlStr));
-    return u.host || "";
-  } catch (_) {
-    return "";
-  }
-}
-
-// JST の「今日の日付」(YYYY-MM-DD) を返す
-export function todayJst() {
+/**
+ * 現在時刻を JST(UTC+9) に変換した Date を返す。
+ * 実行環境のタイムゾーンに依存しないように、一度 UTC に揃えてから +9h する。
+ */
+export function getJstNow() {
   const now = new Date();
-  const tzOffsetMinutes = 9 * 60; // JST(UTC+9)
-  const jst = new Date(
-    now.getTime() + (tzOffsetMinutes - now.getTimezoneOffset()) * 60000
-  );
-  return jst.toISOString().slice(0, 10);
+  const utcTime = now.getTime() + now.getTimezoneOffset() * 60 * 1000;
+  const jstTime = utcTime + 9 * 60 * 60 * 1000;
+  return new Date(jstTime);
 }
 
-// TRUE/FALSE っぽい値を boolean に変換
-// - true とみなす: true, "true", "1", "yes", "y", "on"
-// - false とみなす: false, "", null, undefined, "false", "0", "no", "n", "off"
-export function toBool(v) {
-  if (typeof v === "boolean") return v;
-  if (v === null || v === undefined) return false;
-
-  const s = String(v).trim().toLowerCase();
-  if (!s) return false;
-
-  if (["false", "0", "no", "n", "off", "ng"].includes(s)) return false;
-  if (["true", "1", "yes", "y", "on", "ok"].includes(s)) return true;
-
-  // どちらでもない曖昧な場合は「有効」とみなして true
-  return true;
+/**
+ * JST Date -> 'YYYY/MM/DD'
+ * 案件DB の「取得日」用。
+ */
+export function formatJstDate(jstDate) {
+  const y = jstDate.getUTCFullYear();
+  const m = String(jstDate.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(jstDate.getUTCDate()).padStart(2, '0');
+  return `${y}/${m}/${d}`;
 }
 
-// 簡易なランダムID（案件DBのA列などで使用）
-export function randomId(length = 4) {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let out = "";
-  for (let i = 0; i < length; i++) {
-    out += chars[Math.floor(Math.random() * chars.length)];
+/**
+ * JST Date -> 'YYYY-MM-DD HH:mm:ss'
+ * ログ A 列用。
+ */
+export function formatJstDateTime(jstDate) {
+  const y = jstDate.getUTCFullYear();
+  const m = String(jstDate.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(jstDate.getUTCDate()).padStart(2, '0');
+  const hh = String(jstDate.getUTCHours()).padStart(2, '0');
+  const mm = String(jstDate.getUTCMinutes()).padStart(2, '0');
+  const ss = String(jstDate.getUTCSeconds()).padStart(2, '0');
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss}`;
+}
+
+/**
+ * 本文テキストから補助率だけを抽出する。
+ *
+ * 優先順位：
+ *   1. 「補助率」「助成率」付近 80 文字から % を探す
+ *   2. 同じ範囲で 1/2, 2/3 などの分数
+ *   3. 「3分の2」→ 2/3 の形に正規化
+ *
+ * 返り値： '1/2', '2/3', '50%' 等。見つからなければ ''。
+ */
+export function extractSubsidyRateFromText(text) {
+  if (!text) return '';
+
+  const keywords = ['補助率', '助成率', '補助金率'];
+  let idx = -1;
+
+  for (const kw of keywords) {
+    const i = text.indexOf(kw);
+    if (i !== -1) {
+      idx = i;
+      break;
+    }
   }
-  return out;
-}
 
-// Promise ベースの sleep（必要なら使用）
-export function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  let area;
+  if (idx === -1) {
+    // キーワードが見つからない場合は冒頭 200 文字だけを対象にする
+    area = text.slice(0, 200);
+  } else {
+    const start = Math.max(0, idx);
+    const end = Math.min(text.length, idx + 80);
+    area = text.slice(start, end);
+  }
+
+  // 全角数字／スラッシュ／％ を半角に揃える & 空白除去
+  const zenkakuMap = {
+    '０': '0',
+    '１': '1',
+    '２': '2',
+    '３': '3',
+    '４': '4',
+    '５': '5',
+    '６': '6',
+    '７': '7',
+    '８': '8',
+    '９': '9',
+    '／': '/',
+    '％': '%',
+  };
+
+  const normalized = area
+    .replace(/[０-９／％]/g, (ch) => zenkakuMap[ch] ?? ch)
+    .replace(/\s+/g, '');
+
+  // 1) パーセント表記（70%, 50% など）
+  const mPercent = normalized.match(/(\d{1,3})%/);
+  if (mPercent) {
+    return `${mPercent[1]}%`;
+  }
+
+  // 2) 分数表記 1/2, 2/3 など
+  const mFrac = normalized.match(/(\d{1,2}\/\d{1,2})/);
+  if (mFrac) {
+    const [numStr, denStr] = mFrac[1].split('/');
+    const den = Number(denStr);
+    // 4/21（日時）などを避けるため、分母 12 以下だけ許可
+    if (den > 0 && den <= 12) {
+      return mFrac[1];
+    }
+  }
+
+  // 3) 「3分の2」→ 2/3 の形式
+  const mBunno = normalized.match(/(\d{1,2})分の(\d{1,2})/);
+  if (mBunno) {
+    const bunbo = Number(mBunno[1]);
+    const bunshi = mBunno[2];
+    if (bunbo > 0 && bunbo <= 12) {
+      return `${bunshi}/${bunbo}`;
+    }
+  }
+
+  return '';
 }
