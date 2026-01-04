@@ -1,5 +1,11 @@
+// src/sheets.js
 import { google } from 'googleapis';
-import { getJstNow, formatJstDateTime } from './utils.js';
+import {
+  getJstNow,
+  formatJstDateTime,
+  todayJst,
+  randomId,
+} from './utils.js';
 
 const SHEET_ID = process.env.SHEET_ID;
 const SA_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -20,24 +26,23 @@ const sheets = google.sheets({ version: 'v4', auth });
 export { sheets as sheetsClient, SHEET_ID };
 
 // ==============================
-// ログ関連
+// ログ関連（JST で統一）
 // ==============================
 
-function nowJstDateTimeString() {
-  const now = new Date();
-  const jstMillis = now.getTime() + (9 * 60 - now.getTimezoneOffset()) * 60000;
-  const jst = new Date(jstMillis);
-  return jst.toISOString().replace('T', ' ').slice(0, 19);
-}
-
 async function appendLog(level, message) {
-  const ts = nowJstDateTimeString();
+  // ❶ JST の現在時刻を取得
+  const jstNow = getJstNow();
+  // ❷ 'YYYY-MM-DD HH:mm:ss' 形式に整形
+  const ts = formatJstDateTime(jstNow);
+
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
     range: 'ログ!A:C',
     valueInputOption: 'RAW',
     insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: [[ts, level, message]] },
+    requestBody: {
+      values: [[ts, level, String(message)]],
+    },
   });
 }
 
@@ -47,6 +52,10 @@ export async function logInfo(message) {
 
 export async function logWarn(message) {
   return appendLog('WARN', message);
+}
+
+export async function logError(message) {
+  return appendLog('ERROR', message);
 }
 
 // ==============================
@@ -202,7 +211,7 @@ export async function findRecordsNeedingBody(limit = 20) {
   return targets;
 }
 
-// findRecordsNeedingBody で拾った行に対して、本文明を一括で書き込む
+// findRecordsNeedingBody で拾った行に対して、本文を一括で書き込む
 export async function writeBodies(targets) {
   if (!targets || targets.length === 0) return;
 
